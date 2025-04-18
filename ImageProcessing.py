@@ -108,104 +108,173 @@ def warp_perspective_transform(image, grid_contour, target_size=450):
 
 
 # --------------------------------------------------------------------------- #
-# 4. digit recognition
+# 4. MUCH better digit recognition
 # --------------------------------------------------------------------------- #
+#
+# (1)  deskew()       – mutates every sample so the mass centre sits on
+#                       the vertical symmetry axis.
+# (2)  hog()          – 16‑bin Histogram‑of‑Oriented‑Gradients, identical
+#                       to the OpenCV sample implementation.
+# (3)  _train_svm()   – trains once, then stores a ‘digits_svm.yml’ next to
+#                       the script so the next run just loads it.
+# (4)  _recognise_single_digit() – new, much more robust pipeline.
+#
 
-def _train_knn_digit_classifier():
-    """
-    Train a simple KNN on OpenCV's “digits.png” sample.
-    If the file is not available locally it is downloaded automatically.
-    """
-    # 1.  Locate or download digits.png
+def _deskew(img):
+    m = cv2.moments(img)
+    if abs(m["mu02"]) < 1e-2:          # nearly no y‑variation → skip
+        return img.copy()
+    skew = m["mu11"] / m["mu02"]
+    M = np.float32([[1, skew, -0.5 * 20 * skew],
+                    [0, 1,             0      ]])
+    img = cv2.warpAffine(img, M, (20, 20),
+                         flags=cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR)
+    return img
+
+
+def _hog(img):
+    gx = cv2.Sobel(img, cv2.CV_32F, 1, 0)
+    gy = cv2.Sobel(img, cv2.CV_32F, 0, 1)
+    mag, ang = cv2.cartToPolar(gx, gy, angleInDegrees=True)
+
+    bins = np.int32(16 * ang / 360)           # 16 bins
+    bin_cells = []
+    mag_cells = []
+    # 4 blocks of 10×10 pixels each
+    for i in range(2):
+        for j in range(2):
+            bin_cells.append(bins[i*10:(i+1)*10, j*10:(j+1)*10])
+            mag_cells.append(mag[i*10:(i+1)*10, j*10:(j+1)*10])
+
+    hist = [np.bincount(b.ravel(),
+                        m.ravel(),
+                        16) for b, m in zip(bin_cells, mag_cells)]
+    return np.hstack(hist).astype(np.float32)
+
+
+def _train_svm(model_path="digits_svm.yml"):
+    model_file = Path(__file__).with_name(model_path)
+    if model_file.exists():
+        svm = cv2.ml.SVM_load(str(model_file))
+        return svm
+
+    # ------------------------------------------------------------------ #
+    # 1.  read training image (download if necessary – identical code)
     here = Path(__file__).resolve().parent
     local_copy = here / "digits.png"
-
     if local_copy.exists():
         sample_path = str(local_copy)
     else:
-        # Try the OpenCV sample search mechanism first
         sample_path = cv2.samples.findFile("digits.png", required=False)
-
         if not sample_path or not Path(sample_path).exists():
-            # Nothing found – download the file once and keep it next to the script
             print("digits.png not found – downloading it ...")
             urllib.request.urlretrieve(_DIGITS_URL, local_copy)
             sample_path = str(local_copy)
 
-    # 2.  Load the image
     digits_img = cv2.imread(sample_path, cv2.IMREAD_GRAYSCALE)
     if digits_img is None:
-        raise FileNotFoundError(f"Could not load digits.png from {sample_path}")
+        raise FileNotFoundError("Could not load digits.png")
 
-    # 3.  Prepare training data exactly like before
-    rows  = np.vsplit(digits_img, 50)           # 50 rows
-    cells = [np.hsplit(r, 100) for r in rows]   # 100 columns
-    cells = np.array(cells)                     # (50,100,20,20)
+    # ------------------------------------------------------------------ #
+    # 2.  split -> deskew -> HOG
+    rows  = np.vsplit(digits_img, 50)            # 50 rows
+    cells = [np.hsplit(r, 100) for r in rows]    # 100 columns
+    cells = np.array(cells, dtype=np.uint8)      # (50,100,20,20)
 
-    train  = cells.reshape(-1, 400).astype(np.float32)   # 5000 × 400
-    labels = np.repeat(np.arange(10), 500)[:, None].astype(np.float32)
+    train_data = []
+    for img in cells.reshape(-1, 20, 20):
+        img = _deskew(img)
+        train_data.append(_hog(img))
+    train_data = np.vstack(train_data)
 
-    knn = cv2.ml.KNearest_create()
-    knn.train(train, cv2.ml.ROW_SAMPLE, labels)
-    return knn
+    labels = np.repeat(np.arange(10), 500)[:, None]
+
+    # ------------------------------------------------------------------ #
+    # 3.  train SVM
+    svm = cv2.ml.SVM_create()
+    svm.setKernel(cv2.ml.SVM_RBF)
+    svm.setC(2.5)
+    svm.setGamma(0.05)
+    svm.train(train_data, cv2.ml.ROW_SAMPLE, labels)
+    svm.save(str(model_file))
+    print(f"SVM trained and cached at {model_file}")
+    return svm
 
 
-def _recognise_single_digit(cell, knn):
+_SVM = None          # will be initialised on first call of recognise()
+
+
+def _recognise_single_digit(cell):
     """
-    Try to recognise the digit present in the given cell (grayscale NumPy
-    array).  Returns an int 0‑9; 0 means “no digit”.
+    Try to recognise the digit present in `cell` (BGR or grayscale image).
+    Returns an int 0‑9; 0 means “no digit detected”.
     """
+    global _SVM
+    if _SVM is None:
+        _SVM = _train_svm()
+
+    if len(cell.shape) == 3:
+        cell = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY)
+
     h, w = cell.shape[:2]
+    margin = int(0.12 * min(h, w))        # drop ~12 % border → bye bye grid
+    cell = cell[margin:h - margin, margin:w - margin]
 
-    # Binary image: white digit on black background.
-    thresh = cv2.threshold(cell, 0, 255,
-                           cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
+    # binarise & strip really thin stuff (grid leftovers)
+    thresh = cv2.adaptiveThreshold(cell, 255,
+                                   cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                   cv2.THRESH_BINARY_INV,
+                                   11, 2)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
 
-    # Keep only the biggest blob inside the cell.
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL,
                                    cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return 0
 
     cnt = max(contours, key=cv2.contourArea)
-    area = cv2.contourArea(cnt)
-    if area < (h * w) * 0.02:     # too small → probably empty
+    if cv2.contourArea(cnt) < 0.02 * h * w:   # still almost empty
         return 0
 
     x, y, w0, h0 = cv2.boundingRect(cnt)
     digit_roi = thresh[y:y + h0, x:x + w0]
 
-    # Normalise to 20×20 like the training data.
-    digit_roi = cv2.resize(digit_roi, (20, 20))
-    sample = digit_roi.reshape(1, 400).astype(np.float32)
+    # put the digit on a 20×20 canvas, keeping aspect ratio
+    canvas = np.zeros((20, 20), dtype=np.uint8)
+    roi_h, roi_w = digit_roi.shape
+    scale = 18.0 / max(roi_h, roi_w)
+    roi = cv2.resize(digit_roi, (int(roi_w * scale), int(roi_h * scale)))
+    dy = (20 - roi.shape[0]) // 2
+    dx = (20 - roi.shape[1]) // 2
+    canvas[dy:dy + roi.shape[0], dx:dx + roi.shape[1]] = roi
 
-    _, result, _, _ = knn.findNearest(sample, k=5)
-    return int(result[0][0])
+    canvas = _deskew(canvas)
+    sample = _hog(canvas).reshape(1, -1)
+    _, result = _SVM.predict(sample)
+    return int(result[0, 0])
 
 
 def extract_and_recognize_digits(grid_image):
     """
-    Split the warped grid into its 81 cells, recognise each digit,
-    and return a 9×9 NumPy array containing the board (0 = blank).
+    Split the warped grid into 81 cells, recognise each digit,
+    and return a 9×9 NumPy array (0 = blank).
     """
-    gray_grid = cv2.cvtColor(grid_image, cv2.COLOR_BGR2GRAY)
-    h, w = gray_grid.shape[:2]
-    cell_h = h // 9
-    cell_w = w // 9
+    if grid_image.ndim == 2:               # already gray?
+        gray_grid = grid_image
+    else:
+        gray_grid = cv2.cvtColor(grid_image, cv2.COLOR_BGR2GRAY)
 
-    # Train the digit classifier once.
-    knn = _train_knn_digit_classifier()
+    h, w = gray_grid.shape
+    cell_h, cell_w = h // 9, w // 9
 
     board = np.zeros((9, 9), dtype=int)
-
-    for row in range(9):
-        for col in range(9):
-            y0, y1 = row * cell_h, (row + 1) * cell_h
-            x0, x1 = col * cell_w, (col + 1) * cell_w
+    for r in range(9):
+        for c in range(9):
+            y0, y1 = r * cell_h, (r + 1) * cell_h
+            x0, x1 = c * cell_w, (c + 1) * cell_w
             cell = gray_grid[y0:y1, x0:x1]
-            digit = _recognise_single_digit(cell, knn)
-            board[row, col] = digit
-
+            board[r, c] = _recognise_single_digit(cell)
     return board
 
 
