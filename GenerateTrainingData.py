@@ -1,23 +1,28 @@
 import cv2
 import numpy as np
 import random
-from skimage.morphology import clear_border # Optional: for removing border-touching elements
-import os # For potential font file handling if needed (though using OpenCV fonts here)
+# skimage is not needed if we are not processing cells
+# from skimage.segmentation import clear_border
+import os # For directory creation and path joining
+import shutil # For cleaning up the sample directory if needed
 
 # --- Constants ---
-NUM_IMAGES_PER_DIGIT = 10
+# NUM_IMAGES_PER_DIGIT = 1 # We only need 1 image per digit for the sample
 GRID_SIZE = 9
 # Base size for generating the initial image (before perspective warp)
-# Make it larger than final rectified size to avoid quality loss during warping
 BASE_IMAGE_SIZE = 1000
 # Target size for the rectified Sudoku grid (square) after perspective correction
-RECTIFIED_GRID_SIZE = 900
-CELL_SIZE = RECTIFIED_GRID_SIZE // GRID_SIZE # Size of one cell after rectification (100x100)
+# RECTIFIED_GRID_SIZE = 900 # Not strictly needed for saving the warped image
+# CELL_SIZE = RECTIFIED_GRID_SIZE // GRID_SIZE # Not needed
 # Target size for the final processed cell images for the dataset
-FINAL_CELL_SIZE = (28, 28)
+# FINAL_CELL_SIZE = (28, 28) # Not needed
+# Directory to save sample images
+SAMPLE_IMAGE_DIR = "sample_images" # Changed name to avoid confusion
 
 # --- Helper Functions ---
 
+# order_points is only needed for rectify_perspective, which we aren't using here.
+# It can be kept if you might use it later, or removed. Let's keep it for now.
 def order_points(pts):
     """
     Orders the 4 points of a contour/quadrilateral
@@ -43,9 +48,6 @@ def order_points(pts):
     rect[0] = pts[np.argmin(s)] # Top-left (smallest sum)
     rect[2] = pts[np.argmax(s)] # Bottom-right (largest sum)
 
-    # Difference (y - x)
-    # Note: np.diff calculates difference between consecutive elements.
-    # We need y-x, so calculate explicitly or use difference from sums
     diff = np.array([p[1] - p[0] for p in pts])
     rect[1] = pts[np.argmin(diff)] # Top-right (smallest difference y-x)
     rect[3] = pts[np.argmax(diff)] # Bottom-left (largest difference y-x)
@@ -129,7 +131,6 @@ def generate_sudoku_image(digit):
     image = noisy_image.astype(np.uint8)
 
     # 5. Apply Perspective Warp
-    # Original corners of the grid on the base image
     h, w = image.shape[:2]
     original_corners = np.array([
         [0, 0],         # Top-left
@@ -138,77 +139,43 @@ def generate_sudoku_image(digit):
         [0, h - 1]      # Bottom-left
     ], dtype="float32")
 
-    # Define target corners for the warp (introduce randomness)
-    max_shift_x = w * 0.1 # Max horizontal shift (e.g., 10%)
-    max_shift_y = h * 0.1 # Max vertical shift
+    max_shift_x = w * 0.1
+    max_shift_y = h * 0.1
 
-    # Example: Make top edge narrower, bottom edge maybe slightly wider/skewed
     shifted_corners = np.array([
-        [random.uniform(0, max_shift_x), random.uniform(0, max_shift_y)], # Top-left shift
-        [w - 1 - random.uniform(0, max_shift_x), random.uniform(0, max_shift_y)], # Top-right shift
-        [w - 1 - random.uniform(-max_shift_x/2, max_shift_x/2), h - 1 - random.uniform(0, max_shift_y/2)], # Bottom-right shift
-        [random.uniform(-max_shift_x/2, max_shift_x/2), h - 1 - random.uniform(0, max_shift_y/2)] # Bottom-left shift
+        [random.uniform(0, max_shift_x), random.uniform(0, max_shift_y)],
+        [w - 1 - random.uniform(0, max_shift_x), random.uniform(0, max_shift_y)],
+        [w - 1 - random.uniform(-max_shift_x/2, max_shift_x/2), h - 1 - random.uniform(0, max_shift_y/2)],
+        [random.uniform(-max_shift_x/2, max_shift_x/2), h - 1 - random.uniform(0, max_shift_y/2)]
     ], dtype="float32")
 
-    # Ensure corners maintain reasonable quadrilateral shape (optional check)
-
-    # Calculate the perspective transformation matrix (from original to shifted)
     matrix = cv2.getPerspectiveTransform(original_corners, shifted_corners)
-
-    # Apply the perspective warp
     warped_image = cv2.warpPerspective(image, matrix, (w, h))
 
-    # Return the warped image and the coordinates of the shifted corners
-    # These 'shifted_corners' define where the original grid corners ARE in the warped image.
-    return warped_image, shifted_corners # shifted_corners is already (4, 2) float32
+    return warped_image, shifted_corners
 
 
 # --- Image Processing Functions ---
+# These functions are NOT needed for saving the full warped image,
+# but are kept here if you want to use the script for cell extraction later.
 
 def rectify_perspective(warped_image, warped_corners, output_size):
-    """
-    Rectifies the perspective of a warped Sudoku image using known corner points.
-
-    Args:
-        warped_image (np.ndarray): The input image with perspective distortion.
-        warped_corners (np.ndarray): The (4, 2) array of corner points in the warped image
-                                      that correspond to the original grid corners.
-        output_size (int): The desired side length of the output square image (e.g., 900).
-
-    Returns:
-        np.ndarray: The perspective-corrected square image of the Sudoku grid.
-    """
-    # Define the destination points for the square image
+    # ... (implementation remains the same as before) ...
     dst_pts = np.array([
         [0, 0],
         [output_size - 1, 0],
         [output_size - 1, output_size - 1],
         [0, output_size - 1]
     ], dtype="float32")
-
-    # Order the input warped corners: top-left, top-right, bottom-right, bottom-left
     ordered_warped_pts = order_points(warped_corners)
-
-    # Calculate the perspective transformation matrix (from warped to rectified)
     matrix = cv2.getPerspectiveTransform(ordered_warped_pts, dst_pts)
-
-    # Apply the perspective warp to rectify
     rectified = cv2.warpPerspective(warped_image, matrix, (output_size, output_size))
-
     return rectified
 
 def extract_cells(rectified_grid_image):
-    """
-    Splits the rectified Sudoku grid image into 81 individual cell images.
-
-    Args:
-        rectified_grid_image (np.ndarray): The square, perspective-corrected grid image.
-
-    Returns:
-        list: A list containing 81 NumPy arrays, each representing a cell image.
-    """
+    # ... (implementation remains the same as before) ...
     cells = []
-    current_cell_size = rectified_grid_image.shape[0] // GRID_SIZE # Should match CELL_SIZE constant
+    current_cell_size = rectified_grid_image.shape[0] // GRID_SIZE
     for r in range(GRID_SIZE):
         for c in range(GRID_SIZE):
             start_row = r * current_cell_size
@@ -220,131 +187,75 @@ def extract_cells(rectified_grid_image):
     return cells
 
 def preprocess_cell(cell_image, target_size=(28, 28)):
-    """
-    Preprocesses an individual cell image for OCR training dataset.
-    Converts to grayscale, blurs, thresholds, applies morphology, clears border,
-    and resizes to the target size.
-
-    Args:
-        cell_image (np.ndarray): Image of a single Sudoku cell (expects BGR).
-        target_size (tuple): The final desired (width, height) for the image.
-
-    Returns:
-        np.ndarray: Preprocessed grayscale image resized to target_size.
-    """
-    # 1. Convert to Grayscale
+    # ... (implementation remains the same as before, including skimage import if used) ...
+    # Note: If you remove skimage import, you need to handle the try/except block here
+    # or remove the clear_border step.
     gray_cell = cv2.cvtColor(cell_image, cv2.COLOR_BGR2GRAY)
-
-    # 2. Apply Gaussian Blur
-    # Use a slightly larger kernel before thresholding if needed
     blurred_cell = cv2.GaussianBlur(gray_cell, (5, 5), 0)
-
-    # 3. Apply Adaptive Thresholding (inverse binary)
     thresh_cell = cv2.adaptiveThreshold(blurred_cell, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                        cv2.THRESH_BINARY_INV, 11, 3) # Adjust block size/C if needed
-
-    # 4. Morphological Operations (Optional but requested)
-    # Kernel for morphology - adjust size as needed
+                                        cv2.THRESH_BINARY_INV, 11, 3)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-    # Example: Opening (remove small noise) - might remove thin parts of digits
-    # processed_cell = cv2.morphologyEx(thresh_cell, cv2.MORPH_OPEN, kernel)
-    # Example: Closing (close small gaps) - might connect noise
-    # processed_cell = cv2.morphologyEx(thresh_cell, cv2.MORPH_CLOSE, kernel)
-    # Often, just thresholding is enough, or a specific sequence like dilate then erode
-    # Let's apply a slight dilation to make digits thicker, potentially followed by erosion
-    dilated_cell = cv2.dilate(thresh_cell, kernel, iterations=1)
-    # eroded_cell = cv2.erode(dilated_cell, kernel, iterations=1) # Optional erosion after dilation
-    processed_cell = dilated_cell # Using dilated result
+    processed_cell = cv2.dilate(thresh_cell, kernel, iterations=1)
+    # Optional clear_border step (requires skimage)
+    # try:
+    #     pad_width = 3
+    #     padded_cell = cv2.copyMakeBorder(processed_cell, pad_width, pad_width, pad_width, pad_width, cv2.BORDER_CONSTANT, value=0)
+    #     cleared_padded = clear_border(padded_cell)
+    #     processed_cell = cleared_padded[pad_width:-pad_width, pad_width:-pad_width]
+    # except NameError: # If clear_border wasn't imported or failed
+    #      print("[WARN] clear_border not available or failed. Skipping.")
+    # except Exception as e:
+    #      print(f"[WARN] Error during clear_border: {e}. Skipping.")
 
-    # 5. Clear Border Artifacts
-    try:
-        # Add a small temporary border before clearing, then remove it,
-        # to handle cases where the digit perfectly touches the original edge.
-        pad_width = 3
-        padded_cell = cv2.copyMakeBorder(processed_cell, pad_width, pad_width, pad_width, pad_width, cv2.BORDER_CONSTANT, value=0)
-        cleared_padded = clear_border(padded_cell)
-        # Crop back to original size (before padding)
-        processed_cell = cleared_padded[pad_width:-pad_width, pad_width:-pad_width]
-
-    except ImportError:
-        print("[WARN] skimage not fully installed or import failed. Skipping clear_border.")
-    except Exception as e:
-         print(f"[WARN] Error during clear_border: {e}. Skipping.")
-
-    # 6. Resize to Final Target Size (e.g., 28x28)
-    # Use INTER_AREA for shrinking to potentially preserve features better
     resized_cell = cv2.resize(processed_cell, target_size, interpolation=cv2.INTER_AREA)
-
     return resized_cell
 
 # --- Main Data Generation Pipeline ---
 if __name__ == "__main__":
-    print("[INFO] Starting synthetic Sudoku training data generation...")
+    print("[INFO] Starting synthetic Sudoku full image generation...")
 
-    all_processed_cells = []
-    all_labels = []
+    # Create the target directory, removing it first if it exists
+    if os.path.exists(SAMPLE_IMAGE_DIR):
+        print(f"[INFO] Removing existing directory: {SAMPLE_IMAGE_DIR}")
+        shutil.rmtree(SAMPLE_IMAGE_DIR)
+    print(f"[INFO] Creating directory: {SAMPLE_IMAGE_DIR}")
+    os.makedirs(SAMPLE_IMAGE_DIR, exist_ok=True)
+
+    # Keep track if we saved a sample for each digit
+    saved_samples = {d: False for d in range(1, 10)}
 
     # Loop through digits 1 to 9
     for digit in range(1, 10):
-        print(f"[INFO] Generating images for digit: {digit}")
-        # Generate N images for the current digit
-        for i in range(NUM_IMAGES_PER_DIGIT):
-            print(f"  Generating image {i+1}/{NUM_IMAGES_PER_DIGIT} for digit {digit}...")
+        print(f"[INFO] Generating full image for digit: {digit}")
+        # Generate only the first image (i=0) for each digit
+        i = 0 # Image index is always 0 for these samples
 
-            # 1. Generate Synthetic Sudoku Image + Warp
-            warped_img, warped_corners = generate_sudoku_image(digit)
+        # 1. Generate Synthetic Sudoku Image + Warp
+        # We only need the warped image itself for saving
+        warped_img, _ = generate_sudoku_image(digit) # Ignore warped_corners
 
-            # DEBUG: Show generated warped image
-            # if i == 0: # Show only the first generated image per digit
-            #    cv2.imshow(f"Warped Synthetic - Digit {digit}", warped_img)
-            #    cv2.waitKey(100) # Show for a short time
+        # --- We DO NOT rectify, extract cells, or preprocess for this task ---
 
-            # 2. Rectify Perspective
-            rectified_grid = rectify_perspective(warped_img, warped_corners, RECTIFIED_GRID_SIZE)
+        # 2. Construct Filename (without cell index)
+        filename = f"digit_{digit}_img_{i}.png"
+        filepath = os.path.join(SAMPLE_IMAGE_DIR, filename)
 
-            # DEBUG: Show rectified grid
-            # if i == 0:
-            #    cv2.imshow(f"Rectified Grid - Digit {digit}", rectified_grid)
-            #    cv2.waitKey(100)
+        # 3. Save the full warped image
+        try:
+            cv2.imwrite(filepath, warped_img)
+            print(f"    Saved sample image: {filepath}")
+            saved_samples[digit] = True
+        except Exception as e:
+            print(f"[ERROR] Failed to save image {filepath}: {e}")
 
-            # 3. Extract Cells
-            cells = extract_cells(rectified_grid)
+    print("\n[INFO] Sample full image generation complete.")
+    cv2.destroyAllWindows() # Close any debug windows left open
 
-            # 4. Preprocess Each Cell and Store
-            if len(cells) != GRID_SIZE * GRID_SIZE:
-                 print(f"[WARN] Expected {GRID_SIZE*GRID_SIZE} cells, but found {len(cells)}. Skipping this image.")
-                 continue
-
-            for cell_idx, cell in enumerate(cells):
-                processed_cell = preprocess_cell(cell, target_size=FINAL_CELL_SIZE)
-
-                # DEBUG: Show processed cell
-                # if i == 0 and cell_idx < 5: # Show first few cells of first image
-                #     cv2.imshow(f"Processed Cell ({digit}, {i}, {cell_idx})", processed_cell)
-                #     cv2.waitKey(10)
-
-                all_processed_cells.append(processed_cell)
-                all_labels.append(digit)
-
-    print("[INFO] Data generation complete.")
-    cv2.destroyAllWindows() # Close any debug windows
-
-    # 5. Convert lists to NumPy arrays
-    X_train = np.array(all_processed_cells, dtype=np.uint8) # uint8 for grayscale images (0-255)
-    y_train = np.array(all_labels, dtype=np.uint8)        # uint8 for labels 1-9
-
-    # Verify the shapes
-    expected_count = GRID_SIZE * GRID_SIZE * NUM_IMAGES_PER_DIGIT * 9 # 81 * 10 * 9 = 7290
-    print(f"\n--- Generated Dataset Shapes ---")
-    print(f"X_train (images) shape: {X_train.shape}")
-    print(f"y_train (labels) shape: {y_train.shape}")
-    print(f"Expected number of samples: {expected_count}")
-    if X_train.shape[0] == expected_count and y_train.shape[0] == expected_count:
-        print("[INFO] Dataset shapes match expected count.")
+    # Verify if all samples were saved
+    all_saved = all(saved_samples.values())
+    if all_saved:
+        print(f"[INFO] Successfully saved one sample full image for each digit (1-9) in '{SAMPLE_IMAGE_DIR}'.")
     else:
-        print("[WARN] Dataset shapes DO NOT match expected count!")
-
-    # The NumPy arrays X_train and y_train now hold your synthetic dataset.
-    # You can now use them directly for training an ML model or save them:
-    # np.savez_compressed('synthetic_sudoku_dataset.npz', X_train=X_train, y_train=y_train)
-    # print("\n[INFO] Dataset saved to synthetic_sudoku_dataset.npz (optional)")
+        print("[WARN] Failed to save sample full images for all digits. Check logs.")
+        missing = [d for d, saved in saved_samples.items() if not saved]
+        print(f"Missing samples for digits: {missing}")
