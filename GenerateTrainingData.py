@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 import random
-from skimage.morphology import clear_border # Optional: for removing border-touching elements
+from skimage.segmentation import clear_border # Optional: for removing border-touching elements
 import os # For potential font file handling if needed (though using OpenCV fonts here)
 
 # --- Constants ---
@@ -295,9 +295,9 @@ if __name__ == "__main__":
             warped_img, warped_corners = generate_sudoku_image(digit)
 
             # DEBUG: Show generated warped image
-            # if i == 0: # Show only the first generated image per digit
-            #    cv2.imshow(f"Warped Synthetic - Digit {digit}", warped_img)
-            #    cv2.waitKey(100) # Show for a short time
+            if i == 0: # Show only the first generated image per digit
+               cv2.imshow(f"Warped Synthetic - Digit {digit}", warped_img)
+               cv2.waitKey(100) # Show for a short time
 
             # 2. Rectify Perspective
             rectified_grid = rectify_perspective(warped_img, warped_corners, RECTIFIED_GRID_SIZE)
