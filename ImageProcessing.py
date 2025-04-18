@@ -219,7 +219,5 @@ def main(path):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("usage: python sudoku_reader.py  <sudoku_image>")
-        sys.exit(1)
-    main(sys.argv[1])
+    path = "sudoku_image.png" if len(sys.argv) == 1 else sys.argv[1]
+    main(path)
