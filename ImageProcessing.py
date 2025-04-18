@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-from skimage.morphology import clear_border # Optional: for removing border-touching elements
+from skimage.segmentation import clear_border # Optional: for removing border-touching elements
 import operator # Used for sorting contours
 
 # --- Constants ---
