@@ -4,11 +4,16 @@ End‑to‑end Sudoku grid detection and digit recognition.
 
 usage:  python sudoku_reader.py  sudoku_image.png
 """
-
 import sys
+import urllib
+import urllib.request
+from pathlib import Path
 
 import cv2
 import numpy as np
+
+_DIGITS_URL = ("https://raw.githubusercontent.com/opencv/opencv/"
+               "master/samples/data/digits.png")
 
 
 # --------------------------------------------------------------------------- #
@@ -108,24 +113,37 @@ def warp_perspective_transform(image, grid_contour, target_size=450):
 
 def _train_knn_digit_classifier():
     """
-    Train a simple KNN on OpenCV's 'digits.png' sample (5000 images of size
-    20×20).  Returns the trained cv2.ml.KNearest object.
+    Train a simple KNN on OpenCV's “digits.png” sample.
+    If the file is not available locally it is downloaded automatically.
     """
-    sample_path = cv2.samples.findFile("digits.png")
-    digits_img  = cv2.imread(sample_path, cv2.IMREAD_GRAYSCALE)
+    # 1.  Locate or download digits.png
+    here = Path(__file__).resolve().parent
+    local_copy = here / "digits.png"
+
+    if local_copy.exists():
+        sample_path = str(local_copy)
+    else:
+        # Try the OpenCV sample search mechanism first
+        sample_path = cv2.samples.findFile("digits.png", required=False)
+
+        if not sample_path or not Path(sample_path).exists():
+            # Nothing found – download the file once and keep it next to the script
+            print("digits.png not found – downloading it ...")
+            urllib.request.urlretrieve(_DIGITS_URL, local_copy)
+            sample_path = str(local_copy)
+
+    # 2.  Load the image
+    digits_img = cv2.imread(sample_path, cv2.IMREAD_GRAYSCALE)
     if digits_img is None:
-        raise FileNotFoundError("Could not load OpenCV sample 'digits.png'")
+        raise FileNotFoundError(f"Could not load digits.png from {sample_path}")
 
-    # Split into 20×20 cells: 50 rows × 100 cols = 5000 samples.
-    rows = np.vsplit(digits_img, 50)
-    cells = [np.hsplit(r, 100) for r in rows]
-    cells = np.array(cells)  # shape = (50, 100, 20, 20)
+    # 3.  Prepare training data exactly like before
+    rows  = np.vsplit(digits_img, 50)           # 50 rows
+    cells = [np.hsplit(r, 100) for r in rows]   # 100 columns
+    cells = np.array(cells)                     # (50,100,20,20)
 
-    train = cells.reshape(-1, 400).astype(np.float32)   # 5000 × 400
-
-    # Labels: 500 of each digit 0‑9.
-    k = np.arange(10)
-    labels = np.repeat(k, 500)[:, np.newaxis].astype(np.float32)
+    train  = cells.reshape(-1, 400).astype(np.float32)   # 5000 × 400
+    labels = np.repeat(np.arange(10), 500)[:, None].astype(np.float32)
 
     knn = cv2.ml.KNearest_create()
     knn.train(train, cv2.ml.ROW_SAMPLE, labels)
@@ -219,5 +237,5 @@ def main(path):
 
 
 if __name__ == "__main__":
-    path = "sudoku_image.png" if len(sys.argv) == 1 else sys.argv[1]
+    path = "sodoku_image.png" if len(sys.argv) == 1 else sys.argv[1]
     main(path)
