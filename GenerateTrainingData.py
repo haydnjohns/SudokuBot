@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import random
+from PIL import ImageFont, ImageDraw, Image
 from skimage.segmentation import clear_border # Optional: for removing border-touching elements
 import os # For potential font file handling if needed (though using OpenCV fonts here)
 
@@ -9,7 +10,7 @@ NUM_IMAGES_PER_DIGIT = 10
 GRID_SIZE = 9
 # Base size for generating the initial image (before perspective warp)
 # Make it larger than final rectified size to avoid quality loss during warping
-BASE_IMAGE_SIZE = 1000
+BASE_IMAGE_SIZE = 2000
 # Target size for the rectified Sudoku grid (square) after perspective correction
 RECTIFIED_GRID_SIZE = 900
 CELL_SIZE = RECTIFIED_GRID_SIZE // GRID_SIZE # Size of one cell after rectification (100x100)
@@ -17,6 +18,22 @@ CELL_SIZE = RECTIFIED_GRID_SIZE // GRID_SIZE # Size of one cell after rectificat
 FINAL_CELL_SIZE = (28, 28)
 
 # --- Helper Functions ---
+
+def rectify(h):
+
+    h = h.reshape((4, 2))
+    hnew = np.zeros((4, 2), dtype=np.float32)
+
+    add = h.sum(1)
+    hnew[0] = h[np.argmin(add)]
+    hnew[2] = h[np.argmax(add)]
+
+    diff = np.diff(h, axis=1)
+    hnew[1] = h[np.argmin(diff)]
+    hnew[3] = h[np.argmax(diff)]
+
+    return hnew
+
 
 def order_points(pts):
     """
@@ -69,98 +86,141 @@ def generate_sudoku_image(digit):
                                                     corresponding to the original grid corners
                                                     in the warped image.
     """
-    # 1. Create Base Canvas (Light Gray)
-    background_color = (random.randint(200, 230), random.randint(200, 230), random.randint(200, 230)) # BGR
+    # 1. Choose colors
+    v_line = random.choice(range(50))
+    line_color = (v_line, v_line, v_line)
+    v_text = random.choice(range(50))
+    text_color = (v_text, v_text, v_text)
+    v_background = 255 - random.choice(range(155))
+    background_color = (v_background, v_background, v_background)
+
+    # 2. Create Base Canvas
     image = np.full((BASE_IMAGE_SIZE, BASE_IMAGE_SIZE, 3), background_color, dtype=np.uint8)
     cell_draw_size = BASE_IMAGE_SIZE // GRID_SIZE
 
-    # 2. Draw Grid Lines (Variable Thickness)
-    line_color = (0, 0, 0) # Black
+    # 3. Draw Grid Lines
+    inside_thickness = random.randint(1,4)
+    outside_thickness = max(random.randint(2,5), 1+inside_thickness)  #ensure outside thickness is always greater
     for i in range(GRID_SIZE + 1):
-        thickness = random.randint(1, 2)
+        thickness = inside_thickness
         if i % 3 == 0: # Thicker lines for 3x3 blocks
-            thickness = random.randint(3, 5)
+            thickness = outside_thickness
+        if i == 0 or i == GRID_SIZE:  # double thickness for border because it'll be cut off
+            thickness = outside_thickness * 2
         # Horizontal lines
         start_point_h = (0, i * cell_draw_size)
         end_point_h = (BASE_IMAGE_SIZE, i * cell_draw_size)
         cv2.line(image, start_point_h, end_point_h, line_color, thickness)
-        # Vertical lines
+                # Vertical lines
         start_point_v = (i * cell_draw_size, 0)
         end_point_v = (i * cell_draw_size, BASE_IMAGE_SIZE)
         cv2.line(image, start_point_v, end_point_v, line_color, thickness)
 
-    # 3. Place Digits in Cells (Random Font Size & Offset)
+    # 4. Draw digits
+    font_paths = [
+        "Fonts/arial.ttf",
+        "Fonts/Times New Roman.ttf",
+        "Fonts/Helvetica.ttf",
+        "Fonts/Cambria.ttf",
+        "Fonts/Comic Sans.ttf"
+    ]
+
+    pil_image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil_image)
     digit_str = str(digit)
-    font_face = random.choice([cv2.FONT_HERSHEY_SIMPLEX, cv2.FONT_HERSHEY_PLAIN,
-                               cv2.FONT_HERSHEY_DUPLEX, cv2.FONT_HERSHEY_COMPLEX,
-                               cv2.FONT_HERSHEY_TRIPLEX, cv2.FONT_HERSHEY_SCRIPT_SIMPLEX])
-    text_color = (0, 0, 0) # Black
 
     for r in range(GRID_SIZE):
         for c in range(GRID_SIZE):
-            font_scale = random.uniform(1.8, 3.0) # Randomize size
-            font_thickness = random.randint(1, 3)  # Randomize thickness
+            font_path = random.choice(font_paths)
+            font_size = font_size = random.randint(80, 160)
+            font = ImageFont.truetype(font_path, font_size)
 
-            # Get text size to help centering
-            (text_width, text_height), baseline = cv2.getTextSize(digit_str, font_face, font_scale, font_thickness)
-
-            # Calculate base position (center of the cell)
+            # Get text bounding box
+            bbox = font.getbbox(digit_str)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+            # Cell center
             cell_center_x = c * cell_draw_size + cell_draw_size // 2
             cell_center_y = r * cell_draw_size + cell_draw_size // 2
-
-            # Calculate bottom-left corner for cv2.putText (origin)
+            # Adjust origin using bbox y-offset for better vertical centering
             origin_x = cell_center_x - text_width // 2
-            origin_y = cell_center_y + text_height // 2 # Baseline is below text
-
-            # Add random offset
-            offset_x = random.randint(-cell_draw_size // 8, cell_draw_size // 8)
-            offset_y = random.randint(-cell_draw_size // 8, cell_draw_size // 8)
-
+            origin_y = cell_center_y - (text_height // 2 + bbox[1])  # Compensate for top offset
+            # Apply offset
+            off = 10
+            offset_x = random.randint(-cell_draw_size // off, cell_draw_size // off)
+            offset_y = random.randint(-cell_draw_size // off, cell_draw_size // off)
             final_origin = (origin_x + offset_x, origin_y + offset_y)
+            draw.text(final_origin, digit_str, font=font, fill=text_color)
 
-            cv2.putText(image, digit_str, final_origin, font_face, font_scale, text_color, font_thickness, cv2.LINE_AA)
+    image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)  # Convert back to OpenCV format
 
-    # 4. Add Gaussian Noise
+    # 5. Place the sudoku on a larger page
+    padding = 200
+    outer_size = BASE_IMAGE_SIZE + 2*padding
+    padded_image = np.full((outer_size, outer_size, 3), background_color, dtype=np.uint8)
+    padded_image[padding:padding + BASE_IMAGE_SIZE, padding:padding + BASE_IMAGE_SIZE] = image
+    image=padded_image
+
+
+    # 6. Add Noise
     mean = 0
-    std_dev = random.uniform(5, 15) # Randomize noise level
+    std_dev = random.uniform(10, 30) # Randomize noise level
     noise = np.random.normal(mean, std_dev, image.shape).astype(np.float32)
     noisy_image = image.astype(np.float32) + noise
     noisy_image = np.clip(noisy_image, 0, 255) # Ensure values are within valid range
     image = noisy_image.astype(np.uint8)
 
     # 5. Apply Perspective Warp
-    # Original corners of the grid on the base image
     h, w = image.shape[:2]
+
+    # Define original corners
     original_corners = np.array([
-        [0, 0],         # Top-left
-        [w - 1, 0],     # Top-right
-        [w - 1, h - 1], # Bottom-right
-        [0, h - 1]      # Bottom-left
+        [0, 0],  # Top-left
+        [w - 1, 0],  # Top-right
+        [w - 1, h - 1],  # Bottom-right
+        [0, h - 1]  # Bottom-left
     ], dtype="float32")
 
-    # Define target corners for the warp (introduce randomness)
-    max_shift_x = w * 0.1 # Max horizontal shift (e.g., 10%)
-    max_shift_y = h * 0.1 # Max vertical shift
-
-    # Example: Make top edge narrower, bottom edge maybe slightly wider/skewed
+    # Define shifted corners with specific random movement constraints
     shifted_corners = np.array([
-        [random.uniform(0, max_shift_x), random.uniform(0, max_shift_y)], # Top-left shift
-        [w - 1 - random.uniform(0, max_shift_x), random.uniform(0, max_shift_y)], # Top-right shift
-        [w - 1 - random.uniform(-max_shift_x/2, max_shift_x/2), h - 1 - random.uniform(0, max_shift_y/2)], # Bottom-right shift
-        [random.uniform(-max_shift_x/2, max_shift_x/2), h - 1 - random.uniform(0, max_shift_y/2)] # Bottom-left shift
+        [random.uniform(800, 1000), random.uniform(800, 1000)],  # Top-left
+        [w - 1 - random.uniform(800, 1000), random.uniform(800, 1000)],  # Top-right
+        [w - 1 - random.uniform(0, 200), h - 1 - random.uniform(0, 200)],  # Bottom-right
+        [random.uniform(0, 200), h - 1 - random.uniform(0, 200)]  # Bottom-left
     ], dtype="float32")
 
-    # Ensure corners maintain reasonable quadrilateral shape (optional check)
-
-    # Calculate the perspective transformation matrix (from original to shifted)
+    # Get perspective transform matrix and apply warp
     matrix = cv2.getPerspectiveTransform(original_corners, shifted_corners)
-
-    # Apply the perspective warp
     warped_image = cv2.warpPerspective(image, matrix, (w, h))
+    cropped_image = warped_image[750:h-200, 200:w-200]
+    h, w = cropped_image.shape[:2]
 
-    # Return the warped image and the coordinates of the shifted corners
-    # These 'shifted_corners' define where the original grid corners ARE in the warped image.
-    return warped_image, shifted_corners # shifted_corners is already (4, 2) float32
+    # 7. Apply Lens Blur
+    strength = random.uniform(1,2)
+    direction = random.choice(['top', 'bottom', 'both'])
+
+    # Create a blurred copy of the image
+    blurred = cv2.GaussianBlur(cropped_image, (0, 0), strength)
+
+    # Create vertical gradient mask (1 = sharp, 0 = blurred)
+    if direction == 'top':
+        mask = np.linspace(1, 0, h).reshape(h, 1)
+    elif direction == 'both':
+        mask = np.abs(np.linspace(-1, 1, h)).reshape(h, 1)
+        mask = 1 - mask  # center sharp, top/bottom blurred
+    else:  # 'bottom'
+        mask = np.linspace(0, 1, h).reshape(h, 1)
+
+    # Expand mask to match image channels
+    mask = np.repeat(mask, w, axis=1)
+    mask = np.dstack([mask] * 3)
+
+    # Blend original and blurred images
+    image = (cropped_image * mask + blurred * (1 - mask)).astype(np.uint8)
+
+    return image, shifted_corners # shifted_corners is already (4, 2) float32
+
+
 
 
 # --- Image Processing Functions ---
@@ -295,9 +355,9 @@ if __name__ == "__main__":
             warped_img, warped_corners = generate_sudoku_image(digit)
 
             # DEBUG: Show generated warped image
-            if i == 0: # Show only the first generated image per digit
-               cv2.imshow(f"Warped Synthetic - Digit {digit}", warped_img)
-               cv2.waitKey(100) # Show for a short time
+            # if i == 0: # Show only the first generated image per digit
+            cv2.imshow(f"Warped Synthetic - Digit {digit}", warped_img)
+            cv2.waitKey(0) # Show for a short time
 
             # 2. Rectify Perspective
             rectified_grid = rectify_perspective(warped_img, warped_corners, RECTIFIED_GRID_SIZE)
