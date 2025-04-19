@@ -1,4 +1,6 @@
 # digit_extractor.py
+import random
+
 import cv2
 import numpy as np
 from pathlib import Path
@@ -195,7 +197,7 @@ def extract_cells_from_image(image_path_or_array, target_size=DEFAULT_RECTIFIED_
 # (Keep __main__ test block as before, maybe add debug=True to the call)
 if __name__ == "__main__":
     print("Testing DigitExtractor...")
-    test_image_path = "rendered_sudoku_specific.png" # Or use a real image
+    test_image_path = "rendered_sudoku_random.png" # Or use a real image
     if not Path(test_image_path).exists():
          print(f"Test image '{test_image_path}' not found. Run sudoku_renderer.py or provide a real image path.")
     else:
