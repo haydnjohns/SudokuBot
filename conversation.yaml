@@ -4,7 +4,6 @@ local_system:
     - digit_extractor.py
     - sudoku_recogniser.py
     - sudoku_renderer.py
-    - create_examples.py
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -935,80 +934,6 @@ local_system:
           cv2.imwrite(str(img_path), img)
           np.save(gt_path, gt)
           return str(img_path), gt
-    create_examples.py: |
-      """
-      Script to generate example Sudoku images and demonstrate the extraction pipeline.
-
-      Generates a few synthetic Sudoku images, saves the original, the rectified grid,
-      and extracts and saves each individual cell image into separate subfolders.
-      """
-
-      import shutil
-      from pathlib import Path
-
-      import cv2
-      import numpy as np
-
-      from sudoku_renderer import SudokuRenderer
-      from digit_extractor import GRID_SIZE, extract_cells_from_image
-
-      # --- Configuration ---
-      NUM_EXAMPLES = 5
-      OUTPUT_DIR = Path("example_pipeline")
-      RECTIFIED_SIZE = 450  # Match the size used in digit_extractor
-
-      # --- Main Execution ---
-      if __name__ == "__main__":
-          # Clear previous results
-          if OUTPUT_DIR.exists():
-              shutil.rmtree(OUTPUT_DIR)
-          OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-          renderer = SudokuRenderer()
-
-          print(f"Generating {NUM_EXAMPLES} example Sudokus and extracting cells to {OUTPUT_DIR}...")
-
-          for i in range(NUM_EXAMPLES):
-              example_dir = OUTPUT_DIR / f"example_{i+1:02d}"
-              example_dir.mkdir()
-
-              print(f"\n--- Processing Example {i+1}/{NUM_EXAMPLES} ---")
-
-              # 1. Generate a synthetic Sudoku image
-              img, gt_grid, _ = renderer.render_sudoku(allow_empty=True)
-              if img is None:
-                  print(f"Could not render example {i+1}. Skipping.")
-                  continue
-
-              # Save the original rendered image
-              img_path = example_dir / "original_sudoku.png"
-              cv2.imwrite(str(img_path), img)
-              print(f"Saved original image to {img_path}")
-
-              # 2. Extract cells from the image
-              cells, rectified, _ = extract_cells_from_image(img, size=RECTIFIED_SIZE, debug=False)
-
-              if cells is None or rectified is None:
-                  print(f"Extraction failed for example {i+1}.")
-                  continue
-
-              # Save the rectified grid image
-              rectified_path = example_dir / "rectified_grid.png"
-              cv2.imwrite(str(rectified_path), rectified)
-              print(f"Saved rectified grid to {rectified_path}")
-
-              # Save each cell image
-              cells_dir = example_dir / "cells"
-              cells_dir.mkdir()
-              print(f"Saving individual cells to {cells_dir}")
-              for cell_idx, cell_img in enumerate(cells):
-                  r, c = divmod(cell_idx, GRID_SIZE)
-                  cell_path = cells_dir / f"cell_{r}_{c}.png"
-                  cv2.imwrite(str(cell_path), cell_img)
-
-              print(f"Successfully processed example {i+1}.")
-
-          print("\nPipeline demonstration complete.")
   prev_file_contents:
     digit_classifier.py: |
       """
@@ -1937,80 +1862,6 @@ local_system:
           cv2.imwrite(str(img_path), img)
           np.save(gt_path, gt)
           return str(img_path), gt
-    create_examples.py: |
-      """
-      Script to generate example Sudoku images and demonstrate the extraction pipeline.
-
-      Generates a few synthetic Sudoku images, saves the original, the rectified grid,
-      and extracts and saves each individual cell image into separate subfolders.
-      """
-
-      import shutil
-      from pathlib import Path
-
-      import cv2
-      import numpy as np
-
-      from sudoku_renderer import SudokuRenderer
-      from digit_extractor import GRID_SIZE, extract_cells_from_image
-
-      # --- Configuration ---
-      NUM_EXAMPLES = 5
-      OUTPUT_DIR = Path("example_pipeline")
-      RECTIFIED_SIZE = 450  # Match the size used in digit_extractor
-
-      # --- Main Execution ---
-      if __name__ == "__main__":
-          # Clear previous results
-          if OUTPUT_DIR.exists():
-              shutil.rmtree(OUTPUT_DIR)
-          OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-          renderer = SudokuRenderer()
-
-          print(f"Generating {NUM_EXAMPLES} example Sudokus and extracting cells to {OUTPUT_DIR}...")
-
-          for i in range(NUM_EXAMPLES):
-              example_dir = OUTPUT_DIR / f"example_{i+1:02d}"
-              example_dir.mkdir()
-
-              print(f"\n--- Processing Example {i+1}/{NUM_EXAMPLES} ---")
-
-              # 1. Generate a synthetic Sudoku image
-              img, gt_grid, _ = renderer.render_sudoku(allow_empty=True)
-              if img is None:
-                  print(f"Could not render example {i+1}. Skipping.")
-                  continue
-
-              # Save the original rendered image
-              img_path = example_dir / "original_sudoku.png"
-              cv2.imwrite(str(img_path), img)
-              print(f"Saved original image to {img_path}")
-
-              # 2. Extract cells from the image
-              cells, rectified, _ = extract_cells_from_image(img, size=RECTIFIED_SIZE, debug=False)
-
-              if cells is None or rectified is None:
-                  print(f"Extraction failed for example {i+1}.")
-                  continue
-
-              # Save the rectified grid image
-              rectified_path = example_dir / "rectified_grid.png"
-              cv2.imwrite(str(rectified_path), rectified)
-              print(f"Saved rectified grid to {rectified_path}")
-
-              # Save each cell image
-              cells_dir = example_dir / "cells"
-              cells_dir.mkdir()
-              print(f"Saving individual cells to {cells_dir}")
-              for cell_idx, cell_img in enumerate(cells):
-                  r, c = divmod(cell_idx, GRID_SIZE)
-                  cell_path = cells_dir / f"cell_{r}_{c}.png"
-                  cv2.imwrite(str(cell_path), cell_img)
-
-              print(f"Successfully processed example {i+1}.")
-
-          print("\nPipeline demonstration complete.")
   diffs_applied_this_send: true
 system:
   message: |2
@@ -2023,9 +1874,9 @@ system:
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
-    - gf
+    - o3
   code_completion_model:
-    - gf
+    - o3
   commit_message_model:
     - gemini/gemini-2.5-flash-preview-04-17
   max_completion_tokens:
@@ -2983,97 +2834,71 @@ messages:
       and extracts the digits for each of them, putting each into a separate subfolder.
       The goal is to show the stages of the data pipeline.
     metadata:
-  - assistant: |-
-      ```diff
-      --- /dev/null
-      +++ b/create_examples.py
-      @@ -0,0 +1,62 @@
-      +"""
-      +Script to generate example Sudoku images and demonstrate the extraction pipeline.
-      +
-      +Generates a few synthetic Sudoku images, saves the original, the rectified grid,
-      +and extracts and saves each individual cell image into separate subfolders.
-      +"""
-      +
-      +import shutil
-      +from pathlib import Path
-      +
-      +import cv2
-      +import numpy as np
-      +
-      +from sudoku_renderer import SudokuRenderer
-      +from digit_extractor import GRID_SIZE, extract_cells_from_image
-      +
-      +# --- Configuration ---
-      +NUM_EXAMPLES = 5
-      +OUTPUT_DIR = Path("example_pipeline")
-      +RECTIFIED_SIZE = 450  # Match the size used in digit_extractor
-      +
-      +# --- Main Execution ---
-      +if __name__ == "__main__":
-      +    # Clear previous results
-      +    if OUTPUT_DIR.exists():
-      +        shutil.rmtree(OUTPUT_DIR)
-      +    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-      +
-      +    renderer = SudokuRenderer()
-      +
-      +    print(f"Generating {NUM_EXAMPLES} example Sudokus and extracting cells to {OUTPUT_DIR}...")
-      +
-      +    for i in range(NUM_EXAMPLES):
-      +        example_dir = OUTPUT_DIR / f"example_{i+1:02d}"
-      +        example_dir.mkdir()
-      +
-      +        print(f"\n--- Processing Example {i+1}/{NUM_EXAMPLES} ---")
-      +
-      +        # 1. Generate a synthetic Sudoku image
-      +        img, gt_grid, _ = renderer.render_sudoku(allow_empty=True)
-      +        if img is None:
-      +            print(f"Could not render example {i+1}. Skipping.")
-      +            continue
-      +
-      +        # Save the original rendered image
-      +        img_path = example_dir / "original_sudoku.png"
-      +        cv2.imwrite(str(img_path), img)
-      +        print(f"Saved original image to {img_path}")
-      +
-      +        # 2. Extract cells from the image
-      +        cells, rectified, _ = extract_cells_from_image(img, size=RECTIFIED_SIZE, debug=False)
-      +
-      +        if cells is None or rectified is None:
-      +            print(f"Extraction failed for example {i+1}.")
-      +            continue
-      +
-      +        # Save the rectified grid image
-      +        rectified_path = example_dir / "rectified_grid.png"
-      +        cv2.imwrite(str(rectified_path), rectified)
-      +        print(f"Saved rectified grid to {rectified_path}")
-      +
-      +        # Save each cell image
-      +        cells_dir = example_dir / "cells"
-      +        cells_dir.mkdir()
-      +        print(f"Saving individual cells to {cells_dir}")
-      +        for cell_idx, cell_img in enumerate(cells):
-      +            r, c = divmod(cell_idx, GRID_SIZE)
-      +            cell_path = cells_dir / f"cell_{r}_{c}.png"
-      +            cv2.imwrite(str(cell_path), cell_img)
-      +
-      +        print(f"Successfully processed example {i+1}.")
-      +
-      +    print("\nPipeline demonstration complete.")
-
-      ```
+  - assistant: "Response(id='resp_6803a68713648191b58501b2939533f70fc69ad2bb3042e3',
+      created_at=1745069703.0, error=None, incomplete_details=None, instructions=None,
+      metadata={}, model='o3-2025-04-16', object='response', output=[ResponseReasoningItem(id='rs_6803a68856bc8191b7ca462417a0960b0fc69ad2bb3042e3',
+      summary=[], type='reasoning', status=None), ResponseOutputMessage(id='msg_6803a68e91cc8191879a59c0189a73dc0fc69ad2bb3042e3',
+      content=[ResponseOutputText(annotations=[], text='```diff\\n*** Begin Patch\\
+      n*** Add File: generate_pipeline_examples.py\\n+\"\"\"\\n+generate_pipeline_examples.py\\
+      n+=============================\\n+Utility script that demonstrates the full
+      synthetic‑data pipeline:\\n+\\n+1.  Create a handful of synthetic Sudoku photographs
+      with `SudokuRenderer`.\\n+2.  Run the extractor so we get\\n+      • the perspective‑rectified
+      board, and\\n+      • the 81 individual cell crops.\\n+3.  Save everything into
+      clearly‑structured sub‑folders so it can be inspected\\n+   with any ordinary
+      image viewer.\\n+\\n+Resulting folder structure (for N\\xa0=\\xa010):\\n+\\\
+      n+    pipeline_examples/\\n+        00/\\n+            synthetic.png       –
+      raw synthetic photo\\n+            rectified.png       – perspective‑corrected
+      board\\n+            gt_grid.npy         – 9×9 ground‑truth digit array\\n+\
+      \            cell_00.png … cell_80.png\\n+        01/\\n+            …\\n+ \
+      \       …\\n+\\n+Run:\\n+    python generate_pipeline_examples.py   # defaults
+      to 10 examples\\n+    python generate_pipeline_examples.py 20 out_dir\\n+\"\"\
+      \"\\n+\\n+from __future__ import annotations\\n+\\n+import sys\\n+from pathlib
+      import Path\\n+\\n+import cv2\\n+import numpy as np\\n+\\n+from sudoku_renderer
+      import SudokuRenderer\\n+from digit_extractor import extract_cells_from_image,
+      GRID_SIZE\\n+\\n+# ---------------------------------------------------------------------------
+      #\\n+# Configuration\\n+# ---------------------------------------------------------------------------
+      #\\n+\\n+DEFAULT_N_EXAMPLES = 10\\n+DEFAULT_OUT_DIR = Path(\"pipeline_examples\"\
+      )\\n+\\n+# ---------------------------------------------------------------------------
+      #\\n+# Core logic\\n+# ---------------------------------------------------------------------------
+      #\\n+\\n+\\n+def _save_example(idx: int, out_base: Path, renderer: SudokuRenderer)
+      -> None:\\n+    \"\"\"Generate a single example and save all intermediate artefacts.\"\
+      \"\"\\n+    img, gt_grid, corners = renderer.render_sudoku(allow_empty=True)\\\
+      n+\\n+    example_dir = out_base / f\"{idx:02d}\"\\n+    example_dir.mkdir(parents=True,
+      exist_ok=True)\\n+\\n+    cv2.imwrite(str(example_dir / \"synthetic.png\"),
+      img)\\n+    np.save(example_dir / \"gt_grid.npy\", gt_grid)\\n+\\n+    # ──
+      Extraction ───────────────────────────────────────────────────────── #\\n+ \
+      \   cells, rectified, _ = extract_cells_from_image(img)\\n+\\n+    if rectified
+      is not None:\\n+        cv2.imwrite(str(example_dir / \"rectified.png\"), rectified)\\\
+      n+\\n+    if cells is not None:\\n+        for i, cell in enumerate(cells):\\\
+      n+            r, c = divmod(i, GRID_SIZE)\\n+            cv2.imwrite(str(example_dir
+      / f\"cell_{r}{c}.png\"), cell)\\n+\\n+    # Also store the warp corners in case
+      somebody wants to visualise them.\\n+    if corners is not None:\\n+       \
+      \ np.save(example_dir / \"warp_corners.npy\", corners)\\n+\\n+\\n+# ---------------------------------------------------------------------------
+      #\\n+# CLI\\n+# ---------------------------------------------------------------------------
+      #\\n+\\n+\\n+def main() -> None:\\n+    try:\\n+        n_examples = int(sys.argv[1])
+      if len(sys.argv) > 1 else DEFAULT_N_EXAMPLES\\n+    except ValueError:\\n+ \
+      \       print(\"First argument must be an integer (number of examples).\")\\\
+      n+        sys.exit(1)\\n+\\n+    out_dir = Path(sys.argv[2]) if len(sys.argv)
+      > 2 else DEFAULT_OUT_DIR\\n+    out_dir.mkdir(parents=True, exist_ok=True)\\\
+      n+\\n+    print(f\"Generating {n_examples} synthetic Sudoku examples in \\'{out_dir}\\\
+      ' …\")\\n+    renderer = SudokuRenderer()\\n+\\n+    n_ok, n_fail = 0, 0\\n+\
+      \    idx = 0\\n+    while n_ok < n_examples:\\n+        try:\\n+           \
+      \ _save_example(idx, out_dir, renderer)\\n+            n_ok += 1\\n+       \
+      \ except Exception as exc:  # pragma: no cover – best‑effort demo script\\n+\
+      \            print(f\"[Warning] example\\xa0{idx:02d} failed: {exc}\")\\n+ \
+      \           n_fail += 1\\n+        finally:\\n+            idx += 1\\n+\\n+\
+      \    print(f\"Done. {n_ok} examples generated; {n_fail} failures skipped.\"
+      )\\n+\\n+\\n+if __name__ == \"__main__\":\\n+    main()\\n+\\n*** End Patch\\\
+      n```', type='output_text')], role='assistant', status='completed', type='message')],
+      parallel_tool_calls=True, temperature=1.0, tool_choice='auto', tools=[], top_p=1.0,
+      max_output_tokens=None, previous_response_id=None, reasoning=Reasoning(effort='high',
+      generate_summary=None, summary=None), status='completed', text=ResponseTextConfig(format=ResponseFormatText(type='text')),
+      truncation='disabled', usage=ResponseUsage(input_tokens=15837, input_tokens_details=InputTokensDetails(cached_tokens=0),
+      output_tokens=1686, output_tokens_details=OutputTokensDetails(reasoning_tokens=768),
+      total_tokens=17523), user=None, service_tier='default', store=True)"
     metadata:
-  - user: |
+  - user: |-
       Git apply result:
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: create_examples.py
-      Warning: Attempting to modify non-existent file create_examples.py which is not marked as new. Applying patch to empty content.
-      Applying patch to 'create_examples.py' using custom patcher...
-      Successfully applied patch and wrote to create_examples.py.
-      Warning: File create_examples.py was created by the patch but not marked as new.
-      Added unexpectedly created file create_examples.py to attached files state.
+      No git diff blocks (```diff) found in the last assistant message.
     metadata:
 ...
