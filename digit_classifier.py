@@ -487,7 +487,7 @@ class DigitClassifier:
         # Convert back to NumPy if it's a tensor
         if isinstance(probabilities, torch.Tensor):
             # If using GPU: probabilities = probabilities.cpu()
-            probabilities = probabilities.numpy()
+            probabilities = probabilities.cpu().detach().numpy()
 
         # 4. Interpret results
         predicted_class = int(np.argmax(probabilities))
