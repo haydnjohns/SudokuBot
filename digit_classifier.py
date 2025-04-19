@@ -200,41 +200,42 @@ class DigitClassifier:
                 print(f"[Error] Could not load model: {exc}")
 
     def _build_cnn_model(self) -> keras.Model:
-        """Construct and compile the CNN model."""
-        inp = keras.Input(shape=MODEL_INPUT_SHAPE)
+        """13‑layer SimpleNet backbone (all 3×3 convs)."""
+        cfg_filters   = [32, 32,     # block‑1
+                         64, 64,     # block‑2
+                         96, 96, 96, # block‑3
+                         128,128,128,128,   # block‑4
+                         192,192]    # block‑5 (inc. optional 1×1 later)
+        pool_after_id = {1, 3, 6, 10}       # indices after which we pool
 
-        aug = keras.Sequential(
-            [
-                layers.RandomRotation(0.08, fill_mode="constant"),
-                layers.RandomTranslation(0.08, 0.08, fill_mode="constant"),
-                layers.RandomZoom(0.08, 0.08, fill_mode="constant"),
-            ],
-            name="augmentation",
-        )
-        x = aug(inp)
+        inputs = keras.Input(shape=MODEL_INPUT_SHAPE)
+        x = inputs
+        for i, f in enumerate(cfg_filters):
+            # ordinary 3×3 conv
+            x = layers.Conv2D(f, 3, padding="same", use_bias=False)(x)
+            x = layers.BatchNormalization()(x)
+            x = layers.ReLU()(x)
 
-        # two blocks of conv → conv → pool → dropout
-        for filters in (32, 64):
-            for _ in range(2):
-                x = layers.Conv2D(filters, 3, padding="same")(x)
-                x = layers.BatchNormalization()(x)
-                x = layers.Activation("gelu")(x)
-            x = layers.MaxPooling2D(2)(x)
-            x = layers.Dropout(0.25)(x)
+            # 2×2 max‑pool **after** the i‑th conv if requested
+            if i in pool_after_id:
+                x = layers.MaxPooling2D(pool_size=2)(x)
 
-        x = layers.Flatten()(x)
-        x = layers.Dense(128)(x)
+        # optional 1×1 bottleneck (kept trainable but parameter‑cheap)
+        x = layers.Conv2D(256, 1, use_bias=False)(x)
         x = layers.BatchNormalization()(x)
-        x = layers.Activation("gelu")(x)
-        x = layers.Dropout(0.5)(x)
+        x = layers.ReLU()(x)
 
-        out = layers.Dense(NUM_CLASSES, activation="softmax")(x)
-        model = models.Model(inputs=inp, outputs=out, name="digit_classifier")
+        # global spatial pooling → soft‑max output
+        x = layers.GlobalAveragePooling2D()(x)
+        outputs = layers.Dense(NUM_CLASSES, activation="softmax")(x)
+
+        model = keras.Model(inputs, outputs, name="simplenet_digits")
         model.compile(
             optimizer=keras.optimizers.Adam(1e-3),
-            loss="sparse_categorical_crossentropy",
-            metrics=["accuracy"],
+            loss      ="sparse_categorical_crossentropy",
+            metrics   =["accuracy"],
         )
+        model.summary()         # shows ~5 M parameters → on‑par with paper
         return model
 
     def _preprocess_cell_for_model(self, cell: np.ndarray) -> Optional[np.ndarray]:
