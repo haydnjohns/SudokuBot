@@ -30,6 +30,7 @@ STEPS_PER_EPOCH = 500  # Number of batches per "epoch" (Increase for more traini
 EPOCHS = 30            # Total number of "epochs" (cycles of STEPS_PER_EPOCH batches)
 BATCH_SIZE = 128       # Number of cell images per batch
 VALIDATION_STEPS = 100 # Number of batches for validation per epoch
+GRID_SIZE = 9          # Size of the Sudoku grid
 TARGET_CELL_CONTENT_SIZE = 20 # Target size of digit within the 28x28 frame
 
 # --- Helper function for data generation ---
