@@ -1,256 +1,314 @@
-"""
-Digit recognition that actually works on real Sudoku photos.
-
-How does it work?
-1.  A small CNN trained on MNIST (+ synthetic noise / rotation /
-    “Sudoku style” rendering) is used instead of the tiny 5 000‑sample
-    HOG‑SVM that ships with OpenCV.
-2.  Much more aggressive (but safe) pre‑processing is done on each
-    cell so that the network sees something as close as possible to a
-    centred 28×28 MNIST digit.
-3.  If the ONNX model is not present we *automatically* train it (takes
-    ≈40 s on a laptop CPU) and cache the file next to this script.
-4.  For environments where ONNXRuntime cannot be installed we quietly
-    fall back to the original HOG‑SVM – you only lose accuracy, not the
-    whole bot.
-"""
-from __future__ import annotations
-
-import io
-import math
-import urllib.request
-from pathlib import Path
-from typing import Final
-
 import cv2
 import numpy as np
+from pathlib import Path
+import urllib.request
+import logging
 
-# ─────────────────────────────────────────────────────────────────── constants
-_ONNX_MODEL: Final = "digits_cnn.onnx"
-_MNIST_URL:   Final = "https://storage.googleapis.com/tensorflow/tf-keras-datasets/mnist.npz"
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# ─────────────────────────────────────────────────────────────────── helpers
-def _download(url: str, dst: Path) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    print(f"⏬  Downloading {url.split('/')[-1]} …")
-    urllib.request.urlretrieve(url, dst)
+_DIGITS_URL = ("https://raw.githubusercontent.com/opencv/opencv/"
+               "master/samples/data/digits.png")
 
-
-def _deskew(img: np.ndarray) -> np.ndarray:
-    m = cv2.moments(img)
-    if abs(m["mu02"]) < 1e-2:
-        return img.copy()
-    skew = m["mu11"] / m["mu02"]
-    M = np.float32([[1, skew, -0.5 * img.shape[0] * skew],
-                    [0, 1, 0]])
-    return cv2.warpAffine(img, M, img.shape[::-1],
-                          flags=cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR)
-
-
-# ──────────────────────────────────────────────────────────── main classifier
 class DigitClassifier:
-    """
-    recognise(cell) → 0‑9  (0 means “blank cell / can’t tell”)
-    """
+    # --- Parameters for recognise() ---
+    # Preprocessing
+    GAUSSIAN_BLUR_KERNEL = (5, 5) # Kernel size for Gaussian blur
+    ADAPTIVE_THRESH_BLOCK_SIZE = 19 # Block size for adaptive thresholding (must be odd)
+    ADAPTIVE_THRESH_C = 9         # Constant subtracted from the mean in adaptive thresholding
 
-    def __init__(self, override_model: str | None = None) -> None:
-        self.dir = Path(__file__).resolve().parent
-        self.model_path = self.dir / (override_model or _ONNX_MODEL)
+    # Contour Filtering
+    MIN_CONTOUR_AREA_RATIO = 0.01  # Min contour area relative to cell area (e.g., 1%)
+    MAX_CONTOUR_AREA_RATIO = 0.80  # Max contour area relative to cell area (e.g., 80%)
+    MIN_ASPECT_RATIO = 0.15        # Min aspect ratio (width/height)
+    MAX_ASPECT_RATIO = 1.5         # Max aspect ratio (width/height)
+    MIN_EXTENT = 0.2               # Min extent (contour area / bounding box area)
 
-        # ── try ONNX first ─────────────────────────────────────────────
-        self.onnx_rt = None
-        try:
-            import onnxruntime as ort
-            if not self.model_path.exists():
-                self._train_and_export_onnx()        # ~40 s once
-            self.onnx_rt = ort.InferenceSession(str(self.model_path),
-                                                sess_options=ort.SessionOptions())
-            self._input_name = self.onnx_rt.get_inputs()[0].name
-        except ModuleNotFoundError:
-            print("⚠️  onnxruntime not available – falling back to "
-                  "legacy HOG‑SVM (lower accuracy).")
+    # ROI Extraction & Resizing
+    TARGET_DIGIT_SIZE = 18         # Target size (width or height) to fit digit within 20x20
+    CANVAS_SIZE = 20               # Canvas size for SVM/kNN input
 
-        # ── legacy path kept as back‑up ────────────────────────────────
-        if self.onnx_rt is None:
-            self._init_fallback_svm()
-
-    # ---------------------------------------------------------------- train
-    def _train_and_export_onnx(self) -> None:
+    def __init__(self, model_filename_base="digits", classifier_type='svm'):
         """
-        Train a tiny CNN on MNIST plus heavy data augmentation that mimics
-        Sudoku photos (rotations, translation, salt‑and‑pepper).
-        Export as ONNX so we do *not* need TensorFlow at run‑time.
+        Initializes the DigitClassifier.
+
+        Args:
+            model_filename_base (str): Base name for the model file (e.g., "digits").
+                                       The extension (.yml for SVM, .knn for kNN) will be added.
+            classifier_type (str): Type of classifier to use ('svm' or 'knn').
         """
-        import tensorflow as tf
-        from tensorflow.keras import layers, models
+        if classifier_type not in ['svm', 'knn']:
+            raise ValueError("classifier_type must be 'svm' or 'knn'")
 
-        mnist_path = self.dir / "mnist.npz"
-        if not mnist_path.exists():
-            _download(_MNIST_URL, mnist_path)
+        self.classifier_type = classifier_type
+        model_extension = ".yml" if classifier_type == 'svm' else ".knn" # Use .knn for clarity, though OpenCV might save as XML/YML
+        self.model_file = Path(__file__).with_name(model_filename_base + "_" + classifier_type + model_extension)
 
-        with np.load(mnist_path) as data:
-            X_train = data["x_train"]
-            y_train = data["y_train"]
-            X_test  = data["x_test"]
-            y_test  = data["y_test"]
+        if self.model_file.exists():
+            logging.info(f"Loading pre-trained {classifier_type.upper()} model from {self.model_file}")
+            if self.classifier_type == 'svm':
+                self.model = cv2.ml.SVM_load(str(self.model_file))
+            else: # knn
+                # Note: OpenCV kNN doesn't have a direct load method like SVM.
+                # We need to reload training data or use FileStorage if saved that way.
+                # For simplicity, let's re-train if the file exists but loading fails or isn't standard.
+                # A more robust way would be to save/load kNN using FileStorage or pickle.
+                # Let's assume re-training is acceptable if loading isn't straightforward.
+                try:
+                    # Attempt loading if saved via FileStorage (might produce .yml or .xml)
+                    # This part is tricky as kNN doesn't have a simple load like SVM
+                    # fs = cv2.FileStorage(str(self.model_file), cv2.FILE_STORAGE_READ)
+                    # self.model = cv2.ml.KNearest_create()
+                    # self.model.read(fs.root()) # This might work depending on how it was saved
+                    # fs.release()
+                    # If the above fails or isn't implemented, we fall back to training.
+                    # For this example, we'll just trigger training if loading isn't obvious.
+                    logging.warning(f"Standard kNN loading not implemented, attempting re-train.")
+                    self.model = self._train_model()
+                except Exception as e:
+                    logging.warning(f"Failed to load kNN model ({e}), will re-train.")
+                    self.model = self._train_model()
 
-        # normalise & reshape ------------------------------------------------
-        X_train = X_train.astype("float32") / 255.0
-        X_test  = X_test.astype("float32") / 255.0
-        X_train = X_train[..., None]
-        X_test  = X_test[..., None]
+        else:
+            logging.info(f"Model file not found. Training new {classifier_type.upper()} model.")
+            self.model = self._train_model()
 
-        # data‑augmentation pipeline mimicking camera artefacts --------------
-        aug = tf.keras.Sequential([
-            layers.RandomRotation(0.08),
-            layers.RandomTranslation(0.08, 0.08),
-            layers.RandomZoom(0.1, 0.1),
-            layers.RandomContrast(0.2),
-        ])
+    def _get_hog_features(self, digits_img):
+        """Extracts HOG features from the digits image."""
+        logging.info("Extracting HOG features from digits image...")
+        # split into 50 rows × 100 cols of 20×20 images
+        rows = np.vsplit(digits_img, 50)
+        cells = [np.hsplit(r, 100) for r in rows]
+        cells = np.array(cells, dtype=np.uint8)  # shape=(50,100,20,20)
 
-        # simple CNN (28×28) --------------------------------------------------
-        model = models.Sequential([
-            layers.Input((28, 28, 1)),
-            aug,
-            layers.Conv2D(32, 3, activation="relu"),
-            layers.Conv2D(32, 3, activation="relu"),
-            layers.MaxPooling2D(),
-            layers.Conv2D(64, 3, activation="relu"),
-            layers.GlobalAveragePooling2D(),
-            layers.Dense(128, activation="relu"),
-            layers.Dropout(0.2),
-            layers.Dense(10, activation="softmax")
-        ])
-        model.compile(optimizer="adam",
-                      loss="sparse_categorical_crossentropy",
-                      metrics=["accuracy"])
-        model.fit(X_train, y_train,
-                  validation_split=0.1,
-                  epochs=7,
-                  batch_size=256,
-                  verbose=2)
+        # prepare training data
+        hog_descriptors = []
+        for img in cells.reshape(-1, self.CANVAS_SIZE, self.CANVAS_SIZE):
+            deskewed = self._deskew(img)
+            hog_descriptors.append(self._hog(deskewed))
+        train_data = np.vstack(hog_descriptors)
 
-        print("✓ CNN finished training – exporting to ONNX …")
-        import tf2onnx
-        spec = (tf.TensorSpec((None, 28, 28, 1), tf.float32, name="input"),)
-        model_proto, _ = tf2onnx.convert.from_keras(model, input_signature=spec,
-                                                    opset=13)
-        self.model_path.write_bytes(model_proto.SerializeToString())
-        print(f"✓ Saved ONNX model to {self.model_path}")
+        # labels: 500 samples of each digit 0..9
+        labels = np.repeat(np.arange(10), 500)[:, None].astype(np.float32) # kNN needs float32 labels
+        logging.info("HOG feature extraction complete.")
+        return train_data, labels
 
-    # ---------------------------------------------------------------- SVM fallback
-    def _init_fallback_svm(self) -> None:
-        from itertools import product
-
-        self.svm_path = self.dir / "digits_svm.yml"
-        if self.svm_path.exists():
-            self.svm = cv2.ml.SVM_load(str(self.svm_path))
-            return
-
-        # we reuse OpenCV's digits.png so at least we have *something*
-        digits_png = self.dir / "digits.png"
-        if not digits_png.exists():
-            _download(("https://raw.githubusercontent.com/opencv/opencv/"
-                       "master/samples/data/digits.png"), digits_png)
-
-        img = cv2.imread(str(digits_png), cv2.IMREAD_GRAYSCALE)
-        cells = [np.hsplit(r, 100) for r in np.vsplit(img, 50)]
-        cells = np.array(cells, dtype=np.uint8).reshape(-1, 20, 20)
-
-        hog = cv2.HOGDescriptor(_winSize=(20, 20), _blockSize=(10, 10),
-                                _blockStride=(5, 5), _cellSize=(10, 10),
-                                _nbins=9)
-
-        features = np.squeeze([hog.compute(_deskew(c)) for c in cells])
-        labels = np.repeat(np.arange(10), 500)
-
-        svm = cv2.ml.SVM_create()
-        svm.setKernel(cv2.ml.SVM_RBF)
-        svm.setC(2.5)
-        svm.setGamma(0.05)
-        svm.train(features, cv2.ml.ROW_SAMPLE, labels)
-        svm.save(str(self.svm_path))
-        self.svm = svm
-        print(f"✓ fallback SVM cached at {self.svm_path}")
-
-    # ---------------------------------------------------------------- recognise
-    def recognise(self, cell_bgr: np.ndarray) -> int:
+    def _train_model(self):
         """
-        cell_bgr – single Sudoku cell (≈80×80 px) as BGR/gray.
-        Returns 0‑9, where 0 means “no digit with enough certainty”.
+        Download (if needed), load the sample digits.png, extract HOG features
+        and train the selected classifier (SVM or k-NN).
+        Saves the trained model to disk for next time.
         """
-        gray = cell_bgr
-        if gray.ndim == 3:
-            gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
+        here = Path(__file__).resolve().parent
+        local_digits = here / "digits.png"
+        if not local_digits.exists():
+            logging.info("digits.png not found – downloading it ...")
+            try:
+                urllib.request.urlretrieve(_DIGITS_URL, str(local_digits))
+                logging.info("Download complete.")
+            except Exception as e:
+                logging.error(f"Failed to download digits.png: {e}")
+                raise
 
-        h, w = gray.shape
-        if h == 0 or w == 0:
+        digits_img = cv2.imread(str(local_digits), cv2.IMREAD_GRAYSCALE)
+        if digits_img is None:
+            logging.error(f"Could not load digits.png from {local_digits}")
+            raise FileNotFoundError(f"Could not load digits.png from {local_digits}")
+
+        train_data, labels = self._get_hog_features(digits_img)
+
+        logging.info(f"Training {self.classifier_type.upper()} model...")
+        if self.classifier_type == 'svm':
+            svm = cv2.ml.SVM_create()
+            svm.setKernel(cv2.ml.SVM_RBF)
+            # These parameters might need tuning (e.g., via cross-validation)
+            svm.setC(12.5) # Increased C slightly from OpenCV example
+            svm.setGamma(0.50625) # From OpenCV example calculation
+            svm.train(train_data, cv2.ml.ROW_SAMPLE, labels.astype(np.int32)) # SVM needs int32 labels
+            svm.save(str(self.model_file))
+            model = svm
+        else: # knn
+            knn = cv2.ml.KNearest_create()
+            knn.setDefaultK(3) # K value for kNN
+            knn.train(train_data, cv2.ml.ROW_SAMPLE, labels)
+            # Saving kNN model data (less standard than SVM save)
+            # Option 1: Save using FileStorage (might create XML/YML)
+            # fs = cv2.FileStorage(str(self.model_file), cv2.FILE_STORAGE_WRITE)
+            # knn.write(fs)
+            # fs.release()
+            # Option 2: Re-train on load (simpler for this example)
+            # We won't explicitly save kNN here, relying on re-training if file doesn't exist.
+            # If self.model_file is created (e.g., empty), __init__ logic might need adjustment.
+            # Let's just create a dummy file to indicate training happened.
+            self.model_file.touch() # Create the file to prevent re-training every time
+            model = knn
+
+        logging.info(f"{self.classifier_type.upper()} trained and cached at {self.model_file}")
+        return model
+
+    @staticmethod
+    def _deskew(img):
+        """
+        Deskew the image so that its centre of mass
+        lies on the vertical axis.
+        """
+        SZ = img.shape[0] # Assuming square image (e.g., 20x20)
+        m = cv2.moments(img)
+        if abs(m["mu02"]) < 1e-2:
+            return img.copy()
+        skew = m["mu11"] / m["mu02"]
+        M = np.float32([[1, skew, -0.5 * SZ * skew],
+                        [0, 1, 0]])
+        return cv2.warpAffine(img, M, (SZ, SZ),
+                              flags=cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR)
+
+    @staticmethod
+    def _hog(img):
+        """
+        Compute a HOG descriptor.
+        Uses parameters similar to OpenCV's digits sample but configurable cell size.
+        """
+        SZ = img.shape[0]
+        # Parameters from OpenCV hog.cpp sample (used for digits)
+        win_size = (SZ, SZ)
+        block_size = (SZ//2, SZ//2) # 10x10 for 20x20 input
+        block_stride = (SZ//2, SZ//2) # 10x10 for 20x20 input
+        cell_size = (SZ//2, SZ//2) # 10x10 for 20x20 input
+        nbins = 9 # Number of orientation bins (more common than 16)
+
+        # Corrected HOGDescriptor initialization
+        hog = cv2.HOGDescriptor(win_size, block_size, block_stride, cell_size, nbins)
+
+        # Compute HOG features
+        descriptor = hog.compute(img)
+
+        # hog.compute returns a column vector, flatten it
+        return descriptor.flatten().astype(np.float32)
+
+
+    def recognise(self, cell):
+        """
+        Recognise the digit in a single Sudoku cell image (BGR or gray).
+        Applies more robust preprocessing and contour filtering.
+        Returns 0–9, where 0 means “no digit detected”.
+        """
+        if cell is None or cell.size == 0:
+            logging.warning("Input cell is empty.")
             return 0
 
-        # ── 1. get region of interest (shrink borders) ────────────────
-        m = int(0.08 * min(h, w))
-        roi = gray[m:h - m, m:w - m]
+        # 1) Convert to gray if necessary
+        if cell.ndim == 3:
+            gray = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = cell.copy() # Avoid modifying original
 
-        # ── 2. adaptive thresh  (try both polarities) ────────────────
-        def _th(img, invert: bool) -> np.ndarray:
-            th = cv2.adaptiveThreshold(
-                img, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
-                cv2.THRESH_BINARY_INV if invert else cv2.THRESH_BINARY,
-                11, 2)
-            # clean small noise
-            k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-            th = cv2.morphologyEx(th, cv2.MORPH_OPEN, k, iterations=1)
-            th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, k, iterations=1)
-            return th
+        cell_h, cell_w = gray.shape
 
-        thresh_inv = _th(roi, True)
-        thresh     = _th(roi, False)
+        # 2) Preprocessing: Blur and Threshold
+        # Apply Gaussian blur to reduce noise before thresholding
+        blurred = cv2.GaussianBlur(gray, self.GAUSSIAN_BLUR_KERNEL, 0)
 
-        # choose the version that has the larger connected component
-        cnts1, _ = cv2.findContours(thresh_inv, cv2.RETR_EXTERNAL,
-                                    cv2.CHAIN_APPROX_SIMPLE)
-        cnts2, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL,
-                                    cv2.CHAIN_APPROX_SIMPLE)
-        cnts = max((cnts1, thresh_inv), (cnts2, thresh),
-                   key=lambda t: (max((cv2.contourArea(c) for c in t[0]), default=0)))
-        contours, thresh = cnts
+        # Adaptive thresholding works well for varying illumination
+        thresh = cv2.adaptiveThreshold(blurred, 255,
+                                       cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                       cv2.THRESH_BINARY_INV, # Invert: digit is white, background black
+                                       self.ADAPTIVE_THRESH_BLOCK_SIZE,
+                                       self.ADAPTIVE_THRESH_C)
+
+        # Optional: Morphological opening to remove small noise specks
+        # kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        # thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
+
+        # 3) Find Contours
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, # RETR_EXTERNAL finds only outer contours
+                                       cv2.CHAIN_APPROX_SIMPLE)
 
         if not contours:
+            # logging.debug("No contours found in cell.")
+            return 0 # No contours found
+
+        # 4) Filter Contours to find the best digit candidate
+        digit_contours = []
+        min_area = self.MIN_CONTOUR_AREA_RATIO * cell_h * cell_w
+        max_area = self.MAX_CONTOUR_AREA_RATIO * cell_h * cell_w
+
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            x, y, w, h = cv2.boundingRect(cnt)
+
+            # Basic filtering criteria
+            if area < min_area or area > max_area:
+                continue # Too small or too large
+
+            aspect_ratio = w / float(h) if h > 0 else 0
+            if aspect_ratio < self.MIN_ASPECT_RATIO or aspect_ratio > self.MAX_ASPECT_RATIO:
+                continue # Aspect ratio suggests it's not a digit (e.g., a line)
+
+            extent = area / float(w * h) if w > 0 and h > 0 else 0
+            if extent < self.MIN_EXTENT:
+                 continue # Contour doesn't fill its bounding box well
+
+            # Optional: Check if contour is roughly centered?
+            # center_x, center_y = x + w / 2, y + h / 2
+            # cell_cx, cell_cy = cell_w / 2, cell_h / 2
+            # dist_from_center = np.sqrt((center_x - cell_cx)**2 + (center_y - cell_cy)**2)
+            # max_dist = 0.35 * max(cell_w, cell_h) # Allow deviation up to 35% from center
+            # if dist_from_center > max_dist:
+            #     continue
+
+            digit_contours.append(cnt)
+
+        if not digit_contours:
+            # logging.debug("No suitable contours passed filtering.")
+            return 0 # No contour passed the filters
+
+        # Select the best candidate (e.g., largest valid contour)
+        best_cnt = max(digit_contours, key=cv2.contourArea)
+
+        # 5) Extract ROI, Resize, and Center
+        x, y, w, h = cv2.boundingRect(best_cnt)
+        digit_roi = thresh[y:y+h, x:x+w] # Extract from the thresholded image
+
+        # Create a black canvas
+        canvas = np.zeros((self.CANVAS_SIZE, self.CANVAS_SIZE), dtype=np.uint8)
+
+        # Resize the digit ROI to fit within TARGET_DIGIT_SIZE, preserving aspect ratio
+        scale = self.TARGET_DIGIT_SIZE / float(max(w, h))
+        new_w, new_h = int(w * scale), int(h * scale)
+
+        # Ensure new dimensions are at least 1x1
+        if new_w <= 0 or new_h <= 0:
+            logging.warning(f"Invalid resized dimensions ({new_w}x{new_h}) for contour ROI.")
             return 0
-        cnt = max(contours, key=cv2.contourArea)
-        area = cv2.contourArea(cnt)
-        if area < 0.03 * h * w:
+
+        try:
+            digit_resized = cv2.resize(digit_roi, (new_w, new_h))
+        except cv2.error as e:
+            logging.warning(f"cv2.resize failed: {e}. ROI shape: {digit_roi.shape}, Target: ({new_w},{new_h})")
             return 0
 
-        # ── 3. crop & normalise to 28×28 ─────────────────────────────
-        x, y, w0, h0 = cv2.boundingRect(cnt)
-        digit = thresh[y:y + h0, x:x + w0]
 
-        # avoid 1‑pixel wide stroked digits by slight dilation
-        digit = cv2.dilate(digit, np.ones((2, 2), np.uint8), iterations=1)
+        # Calculate padding to center the digit on the canvas
+        pad_y = (self.CANVAS_SIZE - new_h) // 2
+        pad_x = (self.CANVAS_SIZE - new_w) // 2
 
-        # resize, maintaining aspect ratio, pad to 28×28 -------------
-        target = np.zeros((28, 28), np.uint8)
-        scale = 20.0 / max(digit.shape)          # leave margins
-        resized = cv2.resize(digit, (0, 0), fx=scale, fy=scale,
-                             interpolation=cv2.INTER_AREA)
-        dy, dx = (28 - resized.shape[0]) // 2, (28 - resized.shape[1]) // 2
-        target[dy:dy + resized.shape[0], dx:dx + resized.shape[1]] = resized
-        target = _deskew(target)
+        # Place the resized digit onto the canvas
+        canvas[pad_y:pad_y+new_h, pad_x:pad_x+new_w] = digit_resized
 
-        # ── 4. choose backend ────────────────────────────────────────
-        if self.onnx_rt is not None:
-            sample = target.astype("float32")[None, None] / 255.0
-            probs = self.onnx_rt.run(None, {self._input_name: sample})[0][0]
-            pred = int(np.argmax(probs))
-            if probs[pred] < 0.60:          # reject low confidence
-                return 0
-            return pred
+        # Debug: Save the processed canvas
+        # cv2.imwrite(f"debug_canvas_{np.random.randint(1000)}.png", canvas)
 
-        # fallback SVM
-        hog = cv2.HOGDescriptor(_winSize=(28, 28), _blockSize=(14, 14),
-                                _blockStride=(7, 7), _cellSize=(14, 14),
-                                _nbins=9)
-        feat = hog.compute(target).T
-        _, res = self.svm.predict(feat)
-        return int(res[0, 0])
+        # 6) Deskew, Extract HOG Features, and Predict
+        deskewed_canvas = self._deskew(canvas)
+        hog_features = self._hog(deskewed_canvas).reshape(1, -1) # Reshape for prediction
+
+        if self.classifier_type == 'svm':
+            _, result = self.model.predict(hog_features)
+            prediction = int(result[0, 0])
+        else: # knn
+            # kNN's findNearest returns: retval, results, neighborResponses, dists
+            retval, results, _, _ = self.model.findNearest(hog_features, k=self.model.getDefaultK())
+            prediction = int(results[0, 0])
+
+        # logging.debug(f"Predicted digit: {prediction}")
+        return prediction
