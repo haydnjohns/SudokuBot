@@ -10,7 +10,7 @@ from typing import Tuple, Optional
 import cv2
 import numpy as np
 
-from digit_classifier import EMPTY_LABEL, MODEL_FILENAME, DigitClassifier
+from digit_classifier import MODEL_FILENAME, DigitClassifier
 from digit_extractor import GRID_SIZE, extract_cells_from_image
 
 FINAL_CONFIDENCE_THRESHOLD = 0.80
