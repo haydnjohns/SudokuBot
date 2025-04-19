@@ -5,76 +5,113 @@ os.environ["KERAS_BACKEND"] = "torch" # Or "tensorflow"
 
 import cv2
 import numpy as np
-from pathlib import Path
 import keras
 from keras import layers, models
-import torch # Explicit import for backend functions like torch.no_grad
+import torch # Explicit import for torch backend specifics
+from pathlib import Path
 import random
-import time
+import math
+from sklearn.model_selection import train_test_split
 
-# Try importing necessary components from sibling modules
-try:
-    from sudoku_renderer import SudokuRenderer
-    from digit_extractor import extract_digits
-except ImportError:
-    print("[ERROR] Cannot import SudokuRenderer or digit_extractor.")
-    print("        Ensure sudoku_renderer.py and digit_extractor.py are in the same directory.")
-    # Define dummy classes/functions if imports fail, to allow script loading
-    # This is not ideal but prevents immediate crash if run standalone without siblings
-    class SudokuRenderer: pass
-    def extract_digits(*args, **kwargs): return [], None, None
-
+# Import necessary components from other modules
+from sudoku_renderer import SudokuRenderer
+from digit_extractor import extract_cells_from_image
 
 # --- Constants ---
-_MODEL_FNAME = "sudoku_digit_classifier_cnn.keras"
-_INPUT_SHAPE = (28, 28) # Target size for classification input
-_NUM_CLASSES = 11 # Digits 0-9 + class 10 for empty
-_EMPTY_CLASS_LABEL = 10
+MODEL_FILENAME = "sudoku_digit_classifier_cnn.keras"
+MODEL_INPUT_SHAPE = (28, 28, 1) # Grayscale images, 28x28 pixels
+NUM_CLASSES = 11 # Digits 0-9 + Empty class
+EMPTY_LABEL = 10 # Label for the empty class
+DEFAULT_TRAIN_SAMPLES = 5000 # Number of synthetic Sudokus to generate for training
+DEFAULT_VAL_SPLIT = 0.15
 
 class DigitClassifier:
     """
     Trains and uses a CNN model to classify Sudoku cell images (0-9 or empty).
-
-    Uses SudokuRenderer and digit_extractor to generate training data.
     """
-    def __init__(self, model_filename=_MODEL_FNAME, input_shape=_INPUT_SHAPE):
-        self.model_file = Path(__file__).resolve().parent / model_filename
-        self.input_shape = input_shape
-        self.num_classes = _NUM_CLASSES
+    def __init__(self, model_path=None, training_required=False):
+        """
+        Initializes the classifier. Loads an existing model or prepares for training.
+
+        Args:
+            model_path (str | Path | None): Path to the pre-trained model file.
+                If None, defaults to MODEL_FILENAME in the same directory.
+            training_required (bool): If True, forces training even if a model file exists.
+        """
+        self.model_path = Path(model_path or Path(__file__).parent / MODEL_FILENAME)
         self.model = None
-        self._load_model() # Attempt to load existing model
+        self._model_input_size = MODEL_INPUT_SHAPE[:2] # (height, width)
 
-    def _load_model(self):
-        """Loads the Keras model from the specified file."""
-        if self.model_file.exists():
-            print(f"[INFO] Loading existing model: {self.model_file}")
+        if not training_required and self.model_path.exists():
+            print(f"Loading existing model from: {self.model_path}")
             try:
-                self.model = keras.saving.load_model(self.model_file)
+                self.model = keras.saving.load_model(self.model_path)
                 # Verify input shape compatibility (optional but good practice)
-                if self.model.input_shape[1:3] != self.input_shape:
-                     print(f"[WARN] Loaded model input shape {self.model.input_shape[1:3]} "
-                           f"differs from expected {self.input_shape}. Errors may occur.")
+                if self.model.input_shape[1:3] != self._model_input_size:
+                     print(f"[Warning] Loaded model input shape {self.model.input_shape[1:3]} "
+                           f"differs from expected {self._model_input_size}. Mismatches may occur.")
+                print("Model loaded successfully.")
             except Exception as e:
-                print(f"[ERROR] Failed to load model {self.model_file}: {e}")
-                self.model = None
+                print(f"[Error] Failed to load model: {e}. Will attempt training.")
+                self.model = None # Ensure model is None if loading failed
         else:
-            print(f"[INFO] Model file not found: {self.model_file}")
-            self.model = None
+            if training_required:
+                print("Training explicitly required.")
+            else:
+                print(f"Model not found at {self.model_path}. Training is required.")
+            # Model will be created during training
 
-    def _build_cnn(self):
-        """Builds the Keras CNN model."""
+    def _preprocess_cell_for_model(self, cell_image):
+        """
+        Prepares a single extracted cell image for model input.
+        Input should be a raw cell image (likely BGR or Gray).
+        """
+        if cell_image is None or cell_image.size == 0:
+            # print("[Debug] Preprocessing None or empty cell image.")
+            # Return a blank image of the correct size/type
+            return np.zeros(self._model_input_size, dtype=np.float32)
+
+        # 1. Convert to Grayscale
+        if cell_image.ndim == 3:
+            gray = cv2.cvtColor(cell_image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = cell_image
+
+        # 2. Adaptive Thresholding (Crucial for normalizing contrast and isolating digit)
+        # Use settings robust to noise and varying line thickness
+        thresh = cv2.adaptiveThreshold(gray, 255,
+                                       cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                       cv2.THRESH_BINARY_INV, # Invert: Digit is white, background black
+                                       15, 5) # Block size and C value - may need tuning
+
+        # 3. Optional: Noise Reduction / Morphology
+        # A small opening operation can remove salt-and-pepper noise
+        # kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        # thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+
+        # 4. Resize to Model Input Size
+        # Ensure interpolation handles shrinking well
+        resized = cv2.resize(thresh, self._model_input_size, interpolation=cv2.INTER_AREA)
+
+        # 5. Normalize to [0, 1] float
+        processed = resized.astype("float32") / 255.0
+
+        return processed
+
+    def _build_cnn_model(self):
+        """Defines and compiles the CNN architecture."""
         model = models.Sequential([
-            layers.Input(shape=(self.input_shape[0], self.input_shape[1], 1)), # Grayscale input
-            # Normalize input: Apply thresholding/rescaling *before* model if needed,
-            # or use Rescaling layer if model expects 0-1 floats.
-            # Let's assume preprocessing handles normalization/thresholding,
-            # so the model just gets the processed 28x28 image.
-            # layers.Rescaling(1./255), # Optional: if input is 0-255 uint8
+            layers.Input(shape=MODEL_INPUT_SHAPE),
 
-            # Data Augmentation (applied during training)
-            # Note: Augmentation is less critical if training data is diverse enough
-            # layers.RandomRotation(0.1, fill_mode="constant", fill_value=0),
-            # layers.RandomTranslation(0.1, 0.1, fill_mode="constant", fill_value=0),
+            # Data Augmentation (applied during training only)
+            # Note: Augmentation is often placed *after* Rescaling if applied on GPU
+            # layers.RandomRotation(0.1, fill_mode="constant", fill_value=0.0),
+            # layers.RandomTranslation(0.1, 0.1, fill_mode="constant", fill_value=0.0),
+            # layers.RandomZoom(0.1, 0.1, fill_mode="constant", fill_value=0.0),
+
+            # Consider adding augmentation directly in the training loop if more control is needed
+            # or if using tf.data pipelines. For simplicity here, we might skip it initially
+            # or add it later.
 
             layers.Conv2D(32, (3, 3), activation='relu'),
             layers.MaxPooling2D((2, 2)),
@@ -84,193 +121,112 @@ class DigitClassifier:
             layers.Flatten(),
             layers.Dense(128, activation='relu'), # Increased dense layer size
             layers.Dropout(0.5),
-            layers.Dense(self.num_classes, activation='softmax') # 11 classes
-        ], name="SudokuDigitCNN")
+            layers.Dense(NUM_CLASSES, activation='softmax') # 11 classes (0-9 + empty)
+        ])
 
         model.compile(optimizer='adam',
                       loss='sparse_categorical_crossentropy',
                       metrics=['accuracy'])
+        print("CNN Model Summary:")
+        model.summary()
         return model
 
-    def preprocess_cell_for_model(self, cell_image):
+    def train(self, num_samples=DEFAULT_TRAIN_SAMPLES, epochs=15, batch_size=64, val_split=DEFAULT_VAL_SPLIT):
         """
-        Prepares a single cell image (BGR) for model input.
-        MUST match the preprocessing used during training data generation.
-        """
-        if cell_image is None or cell_image.size == 0:
-            # Return a blank image of the correct size if input is invalid
-            return np.zeros(self.input_shape, dtype=np.uint8)
-
-        # 1. Convert to Grayscale
-        if cell_image.ndim == 3 and cell_image.shape[2] == 3:
-            gray = cv2.cvtColor(cell_image, cv2.COLOR_BGR2GRAY)
-        elif cell_image.ndim == 2:
-            gray = cell_image # Already grayscale
-        else: # Invalid shape, return blank
-             print(f"Warning: Invalid cell image shape {cell_image.shape}, returning blank.")
-             return np.zeros(self.input_shape, dtype=np.uint8)
-
-        # 2. Apply Adaptive Thresholding (to binarize and handle lighting)
-        # This helps normalize the appearance. Tune parameters if needed.
-        thresh = cv2.adaptiveThreshold(gray, 255,
-                                       cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                       cv2.THRESH_BINARY_INV, # Invert: digit is white, bg is black
-                                       15, 5) # Block size, C value - adjust these
-
-        # 3. Optional: Noise removal / Morphological Ops on thresholded image
-        # kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
-        # thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
-
-        # 4. Resize to target input shape (e.g., 28x28)
-        # Use INTER_AREA for shrinking, INTER_LINEAR/CUBIC for enlarging
-        h, w = gray.shape
-        if h > self.input_shape[0] or w > self.input_shape[1]:
-            interpolation = cv2.INTER_AREA
-        else:
-            interpolation = cv2.INTER_LINEAR
-        resized = cv2.resize(thresh, self.input_shape, interpolation=interpolation)
-
-        # 5. Ensure output is uint8 (model might expect float32 0-1 later)
-        return resized.astype(np.uint8)
-
-
-    def _generate_training_data(self, num_samples, renderer_options=None, extractor_options=None):
-        """Generates training data using renderer and extractor."""
-        if not callable(getattr(SudokuRenderer, 'render_sudoku', None)) or \
-           not callable(extract_digits):
-            print("[ERROR] Renderer or Extractor not available/functional. Cannot generate data.")
-            return None, None
-
-        renderer_options = renderer_options if renderer_options else {}
-        extractor_options = extractor_options if extractor_options else {}
-
-        # Initialize renderer (could be passed in)
-        renderer = SudokuRenderer(**renderer_options)
-
-        X_data = [] # List to hold processed cell images (28x28)
-        y_data = [] # List to hold corresponding labels (0-9, or 10 for empty)
-
-        print(f"[INFO] Generating {num_samples} training samples...")
-        start_time = time.time()
-        generated_count = 0
-        attempts = 0
-        max_attempts = num_samples * 3 # Stop if generation is too inefficient
-
-        while generated_count < num_samples and attempts < max_attempts:
-            attempts += 1
-            if attempts % 100 == 0:
-                 print(f"    Attempt {attempts}, Generated {generated_count}/{num_samples}...")
-
-            # 1. Render a Sudoku image with known ground truth
-            # Vary difficulty to get mix of filled/empty cells
-            difficulty = random.uniform(0.2, 0.7)
-            rendered_img, truth_grid, _ = renderer.render_sudoku(difficulty=difficulty)
-
-            # 2. Extract cells from the rendered image
-            # Use the same options as likely used during inference
-            extracted_cells, _, _ = extract_digits(rendered_img, **extractor_options)
-
-            if len(extracted_cells) != 81:
-                # print(f"    Skipping image: Expected 81 cells, got {len(extracted_cells)}")
-                continue # Skip if extraction failed
-
-            # 3. Process each cell and pair with ground truth label
-            for i, cell_img in enumerate(extracted_cells):
-                row, col = divmod(i, 9)
-                true_label = truth_grid[row, col]
-
-                # Assign the 'empty' label if the ground truth is 0
-                label = true_label if true_label != 0 else _EMPTY_CLASS_LABEL
-
-                # Preprocess the cell exactly as done for prediction
-                processed_cell = self.preprocess_cell_for_model(cell_img)
-
-                # Optional: Check if cell is mostly blank after processing
-                # This helps filter out poorly extracted cells or truly empty ones
-                # if np.count_nonzero(processed_cell) < 10 and label != _EMPTY_CLASS_LABEL:
-                #      # print(f"    Skipping cell {i}: Low content but not labeled empty.")
-                #      continue # Skip potentially bad extractions mislabeled as digits
-
-                X_data.append(processed_cell)
-                y_data.append(label)
-                generated_count += 1
-
-                if generated_count >= num_samples:
-                    break
-            if generated_count >= num_samples:
-                    break
-
-        if generated_count < num_samples:
-             print(f"[WARN] Could only generate {generated_count} samples after {attempts} attempts.")
-
-        end_time = time.time()
-        print(f"[INFO] Data generation took {end_time - start_time:.2f} seconds.")
-
-        if not X_data:
-             return None, None
-
-        return np.array(X_data), np.array(y_data)
-
-
-    def train(self,
-              num_train_samples=10000,
-              num_val_samples=2000,
-              epochs=15,
-              batch_size=64,
-              force_retrain=False,
-              renderer_options=None,
-              extractor_options=None):
-        """
-        Trains the CNN model. Generates data if X_train/y_train not provided.
+        Trains the digit classifier using synthetically generated Sudoku data.
 
         Args:
-            num_train_samples: Number of training samples to generate.
-            num_val_samples: Number of validation samples to generate.
-            epochs: Training epochs.
+            num_samples: Number of synthetic Sudoku images to generate.
+            epochs: Number of training epochs.
             batch_size: Training batch size.
-            force_retrain: If True, retrain even if a model file exists.
-            renderer_options: Dict of options passed to SudokuRenderer.
-            extractor_options: Dict of options passed to extract_digits.
+            val_split: Fraction of generated data to use for validation.
         """
-        if self.model and not force_retrain:
-            print("[INFO] Model already loaded and force_retrain=False. Skipping training.")
-            return
+        print(f"\n--- Starting Training ---")
+        print(f"Generating {num_samples} synthetic Sudoku images for training data...")
 
-        # --- Generate Data ---
-        print("\n--- Generating Training Data ---")
-        X_train, y_train = self._generate_training_data(num_train_samples, renderer_options, extractor_options)
-        if X_train is None:
-            print("[ERROR] Failed to generate training data. Aborting training.")
-            return
+        renderer = SudokuRenderer() # Use default settings
+        all_cells = []
+        all_labels = []
+        processed_count = 0
+        generated_count = 0
 
-        print("\n--- Generating Validation Data ---")
-        X_val, y_val = self._generate_training_data(num_val_samples, renderer_options, extractor_options)
-        if X_val is None:
-            print("[ERROR] Failed to generate validation data. Aborting training.")
-            return
+        while processed_count < num_samples * (GRID_SIZE * GRID_SIZE):
+            generated_count += 1
+            if generated_count % 100 == 0:
+                 print(f"  Generated {generated_count} images, processed {processed_count} cells...")
 
-        # --- Prepare Data for Keras ---
-        # Add channel dimension (for grayscale)
-        X_train = np.expand_dims(X_train, axis=-1).astype('float32') / 255.0 # Normalize 0-1
-        X_val = np.expand_dims(X_val, axis=-1).astype('float32') / 255.0   # Normalize 0-1
+            # 1. Generate a synthetic Sudoku image and its ground truth
+            # Ensure a good mix of empty and filled cells
+            allow_empty = random.random() < 0.8 # Generate grids with empties 80% of the time
+            rendered_img, gt_grid, _ = renderer.render_sudoku(allow_empty=allow_empty)
 
-        print(f"\n[INFO] Training data shape: {X_train.shape}, Labels shape: {y_train.shape}")
-        print(f"[INFO] Validation data shape: {X_val.shape}, Labels shape: {y_val.shape}")
-        print(f"[INFO] Label distribution (Train): {np.bincount(y_train, minlength=self.num_classes)}")
-        print(f"[INFO] Label distribution (Val):   {np.bincount(y_val, minlength=self.num_classes)}")
+            # 2. Extract cells from the rendered image using the extractor
+            # This simulates the actual process the recognizer will use
+            extracted_cells, _, _ = extract_cells_from_image(rendered_img)
 
+            if extracted_cells is None:
+                print("[Warning] Failed to extract cells from a generated image. Skipping.")
+                continue
 
-        # --- Build and Train Model ---
-        print("\n--- Building and Training Model ---")
-        self.model = self._build_cnn()
-        self.model.summary()
+            if len(extracted_cells) != GRID_SIZE * GRID_SIZE:
+                 print(f"[Warning] Extracted {len(extracted_cells)} cells instead of {GRID_SIZE*GRID_SIZE}. Skipping.")
+                 continue
 
+            # 3. Pair extracted cells with ground truth labels
+            gt_labels_flat = gt_grid.flatten() # Shape (81,)
+
+            for i, cell_img in enumerate(extracted_cells):
+                label = gt_labels_flat[i]
+                if label == 0:
+                    label = EMPTY_LABEL # Assign the special label for empty cells
+
+                # 4. Preprocess the extracted cell for the model
+                processed_cell = self._preprocess_cell_for_model(cell_img)
+
+                all_cells.append(processed_cell)
+                all_labels.append(label)
+                processed_count += 1
+
+            # Stop if we have enough samples (can overshoot slightly)
+            if processed_count >= num_samples * (GRID_SIZE * GRID_SIZE):
+                break
+
+        print(f"\nGenerated {processed_count} cell samples from {generated_count} Sudoku images.")
+
+        if not all_cells:
+             print("[Error] No training data could be generated. Aborting training.")
+             return
+
+        # Convert to NumPy arrays
+        X = np.array(all_cells).astype('float32')
+        y = np.array(all_labels).astype('int64')
+
+        # Add channel dimension for CNN input
+        X = np.expand_dims(X, -1)
+
+        print(f"Dataset shape: X={X.shape}, y={y.shape}")
+        print(f"Label distribution: {np.unique(y, return_counts=True)}")
+
+        # Split into training and validation sets
+        X_train, X_val, y_train, y_val = train_test_split(
+            X, y, test_size=val_split, random_state=42, stratify=y # Stratify helps with class imbalance
+        )
+        print(f"Training set size: {len(X_train)}")
+        print(f"Validation set size: {len(X_val)}")
+
+        # Build the model
+        self.model = self._build_cnn_model()
+
+        # Define callbacks
         callbacks = [
-            keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True, verbose=1),
-            keras.callbacks.ModelCheckpoint(str(self.model_file), monitor='val_loss', save_best_only=True, verbose=0)
+            keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, verbose=1, restore_best_weights=True),
+            keras.callbacks.ModelCheckpoint(self.model_path, monitor='val_loss', save_best_only=True, verbose=1)
             # ReduceLROnPlateau could also be useful
+            # keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=3, min_lr=0.0001, verbose=1)
         ]
 
+        # Train the model
+        print("\nStarting model fitting...")
         history = self.model.fit(
             X_train, y_train,
             epochs=epochs,
@@ -280,165 +236,114 @@ class DigitClassifier:
             verbose=2 # Use 1 for progress bar, 2 for one line per epoch
         )
 
-        print(f"\n[INFO] Training complete. Best model saved to {self.model_file}")
-        # Reload the best saved model explicitly
-        if self.model_file.exists():
-             self._load_model()
+        print("\nTraining finished.")
+
+        # Load the best weights saved by ModelCheckpoint
+        if self.model_path.exists():
+             print(f"Reloading best model weights from {self.model_path}")
+             self.model = keras.saving.load_model(self.model_path)
         else:
-             print("[WARN] Best model checkpoint file not found after training.")
+             print("[Warning] Best model checkpoint file not found. Using final weights.")
 
 
-    @torch.no_grad() # Disable gradient calculations for inference
-    def predict(self, cell_image, confidence_threshold=0.7):
+        # Evaluate the final (best) model on the validation set
+        loss, accuracy = self.model.evaluate(X_val, y_val, verbose=0)
+        print(f"\nFinal Validation Loss: {loss:.4f}")
+        print(f"Final Validation Accuracy: {accuracy:.4f}")
+
+        # Save the final best model explicitly (redundant if ModelCheckpoint worked, but safe)
+        try:
+            self.model.save(self.model_path)
+            print(f"Model saved successfully to {self.model_path}")
+        except Exception as e:
+            print(f"[Error] Failed to save the final model: {e}")
+
+
+    @torch.no_grad() # Disable gradient calculations for inference (PyTorch backend)
+    def recognise(self, cell_image, confidence_threshold=0.8):
         """
-        Predicts the digit (0-9) or empty (returns 0) for a single cell image.
+        Recognises the digit in a single cell image.
 
         Args:
-            cell_image (np.ndarray): BGR image of the cell.
-            confidence_threshold (float): Minimum confidence required to predict a digit (1-9).
-                                          Predictions below this (or of the empty class) return 0.
+            cell_image (np.ndarray): The image of the cell (BGR or Grayscale).
+            confidence_threshold (float): Minimum probability for a prediction to be accepted.
 
         Returns:
-            int: Predicted digit (1-9) or 0 for empty/uncertain.
+            int: The recognised digit (1-9), or 0 if predicted as empty or below threshold.
         """
         if self.model is None:
-            print("[ERROR] Model not loaded. Cannot predict.")
-            # Attempt to load? Or just return 0?
-            self._load_model()
-            if self.model is None:
-                 print("[ERROR] Failed to load model for prediction.")
-                 return 0 # Return 0 if model cannot be loaded
+            print("[Error] Model not loaded or trained. Cannot recognise.")
+            # Attempt to load or train? For now, just return 0.
+            # Or raise an exception: raise RuntimeError("Model is not available.")
+            return 0
 
-        # 1. Preprocess the cell image
-        processed_cell = self.preprocess_cell_for_model(cell_image)
+        # 1. Preprocess the cell
+        processed_cell = self._preprocess_cell_for_model(cell_image)
 
-        # DEBUG: Save preprocessed cell occasionally
-        # if random.random() < 0.01:
-        #     cv2.imwrite(f"debug_predict_cell_{time.time()}.png", processed_cell)
+        # DEBUG: Save preprocessed cell
+        # cv2.imwrite(f"debug_processed_cell_{random.randint(1000,9999)}.png", (processed_cell * 255).astype(np.uint8))
 
-        # 2. Prepare for model input (batch dim, channel dim, normalize)
-        model_input = np.expand_dims(processed_cell, axis=[0, -1]).astype('float32') / 255.0
+        # 2. Prepare for model input (add batch and channel dimensions)
+        model_input = np.expand_dims(processed_cell, axis=0) # Add batch dim -> (1, H, W)
+        model_input = np.expand_dims(model_input, axis=-1)   # Add channel dim -> (1, H, W, 1)
 
-        # 3. Get prediction probabilities
-        # Keras handles backend automatically, but ensure tensor conversion if needed
-        # For torch backend, Keras usually handles numpy input fine.
-        probabilities = self.model(model_input, training=False)[0] # Use training=False
+        # Convert to PyTorch tensor if using torch backend
+        if keras.backend.backend() == 'torch':
+            model_input_tensor = torch.from_numpy(model_input).float()
+            # If using GPU: model_input_tensor = model_input_tensor.to(next(self.model.parameters()).device)
+        else: # TensorFlow or other backend
+             model_input_tensor = model_input # Keras handles NumPy directly
 
-        # Convert to numpy if it's a tensor (depends on exact Keras/backend version)
-        if hasattr(probabilities, 'numpy'): # Check if it's a TF tensor
-             probabilities = probabilities.numpy()
-        elif hasattr(probabilities, 'cpu'): # Check if it's a Torch tensor
-             probabilities = probabilities.cpu().numpy()
-        # If it's already numpy, this does nothing
+        # 3. Predict probabilities
+        probabilities = self.model(model_input_tensor, training=False)[0] # Get probabilities for the first (only) item in batch
 
-        # 4. Determine predicted class and confidence
+        # Convert back to NumPy if it's a tensor
+        if isinstance(probabilities, torch.Tensor):
+            # If using GPU: probabilities = probabilities.cpu()
+            probabilities = probabilities.numpy()
+
+        # 4. Interpret results
         predicted_class = int(np.argmax(probabilities))
         confidence = float(probabilities[predicted_class])
 
-        # 5. Apply logic: return 0 for empty class or low confidence
-        if predicted_class == _EMPTY_CLASS_LABEL:
-            # print(f"  -> Predicted Empty (Class {predicted_class}), Conf: {confidence:.2f}")
-            return 0
-        elif confidence < confidence_threshold:
-            # print(f"  -> Predicted {predicted_class}, Low Conf: {confidence:.2f} < {confidence_threshold}")
-            return 0
-        else:
-            # print(f"  -> Predicted {predicted_class}, Conf: {confidence:.2f}")
-            # Ensure prediction is within 0-9 range if not empty class
-            return predicted_class if 0 <= predicted_class <= 9 else 0
+        # print(f"[Debug] Pred Class: {predicted_class}, Conf: {confidence:.3f}, Probs: {np.round(probabilities, 2)}") # Debug
 
+        # 5. Decision Logic
+        if predicted_class == EMPTY_LABEL:
+            # print(f"  -> Predicted Empty (Class {EMPTY_LABEL})")
+            return 0 # Return 0 for the empty class
 
-# --- Example Usage ---
+        if confidence < confidence_threshold:
+            # print(f"  -> Low Confidence ({confidence:.3f} < {confidence_threshold})")
+            return 0 # Return 0 if confidence is too low
+
+        # Otherwise, return the predicted digit (predicted_class is 0-9 here)
+        # print(f"  -> Predicted Digit: {predicted_class}")
+        return predicted_class
+
+# --- Example Usage (for training) ---
 if __name__ == "__main__":
-    print("[INFO] Initializing Digit Classifier...")
-    classifier = DigitClassifier()
+    print("Testing DigitClassifier training...")
+    # Force training by setting training_required=True or deleting the model file
+    force_train = False # Set to True to retrain even if model exists
+    model_file = Path(MODEL_FILENAME)
+    if force_train and model_file.exists():
+        print("Forcing retraining, removing existing model file...")
+        model_file.unlink()
 
-    # --- Option 1: Train the model ---
-    # Set force_retrain=True to train even if a model file exists
-    # Adjust num_samples for quicker testing
-    train_model = True # Set to False to skip training if model exists
-    force = False     # Set to True to force retraining
+    classifier = DigitClassifier() # Will load or announce training needed
 
-    if train_model:
-        print("\n--- Starting Training Process ---")
-        # Optional: Customize renderer/extractor for training data generation
-        render_opts = {'warp_intensity': 0.2, 'digit_source_ratio': (0.6, 0.4)}
-        extract_opts = {'cell_border_frac': 0.08}
-        classifier.train(
-            num_train_samples=5000, # Reduce for faster testing
-            num_val_samples=1000,  # Reduce for faster testing
-            epochs=10,             # Reduce for faster testing
-            batch_size=128,
-            force_retrain=force,
-            renderer_options=render_opts,
-            extractor_options=extract_opts
-        )
-    elif classifier.model is None:
-         print("[ERROR] No model loaded and training skipped. Cannot proceed with prediction test.")
-         exit()
-
-    # --- Option 2: Test prediction on a sample image ---
-    print("\n--- Testing Prediction ---")
-    # Generate a test image or use an existing one
-    try:
-        print("[INFO] Generating a test image for prediction...")
-        renderer = SudokuRenderer(warp_intensity=0.15)
-        test_img, test_truth, _ = renderer.render_sudoku(difficulty=0.6)
-        cv2.imwrite("temp_classifier_test.png", test_img)
-        img_to_predict = "temp_classifier_test.png"
-    except Exception as e:
-        print(f"[WARN] Failed to generate test image ({e}). Using fallback path.")
-        img_to_predict = "sample_images/digit_5_img_0.png" # Fallback
-
-    if not Path(img_to_predict).exists():
-         print(f"[ERROR] Test image {img_to_predict} not found. Cannot test prediction.")
-         exit()
-
-    print(f"[INFO] Extracting digits from {img_to_predict} for prediction test...")
-    test_cells, _, _ = extract_digits(img_to_predict, cell_border_frac=0.08) # Use same options as training if specified
-
-    if test_cells and len(test_cells) == 81:
-        print("[INFO] Predicting digits for extracted cells...")
-        predicted_grid = np.zeros((9, 9), dtype=int)
-        correct_predictions = 0
-        total_digits = 0
-
-        for i, cell in enumerate(test_cells):
-            row, col = divmod(i, 9)
-            prediction = classifier.predict(cell, confidence_threshold=0.6) # Adjust threshold
-            predicted_grid[row, col] = prediction
-
-            # Compare with ground truth if available (only for generated images)
-            if 'test_truth' in locals():
-                 true_val = test_truth[row, col]
-                 # Treat predicted 0 as matching true 0 (empty)
-                 is_correct = (prediction == true_val)
-                 if true_val != 0: # Only count accuracy on actual digits
-                      total_digits += 1
-                      if is_correct:
-                           correct_predictions += 1
-                 # Print mismatch details
-                 # if not is_correct:
-                 #      print(f"  Mismatch at ({row},{col}): True={true_val}, Pred={prediction}")
-
-
-        print("\n[INFO] Predicted Grid (0 = empty/uncertain):")
-        print(predicted_grid)
-
-        if 'test_truth' in locals():
-            print("\n[INFO] Ground Truth Grid:")
-            print(test_truth)
-            if total_digits > 0:
-                 accuracy = (correct_predictions / total_digits) * 100
-                 print(f"\n[INFO] Accuracy on non-empty cells: {accuracy:.2f}% ({correct_predictions}/{total_digits})")
-            else:
-                 print("\n[INFO] No non-empty cells in ground truth to calculate accuracy.")
-
+    if classifier.model is None: # Check if training is needed
+        # Train with fewer samples/epochs for a quick test
+        classifier.train(num_samples=500, epochs=5, batch_size=32) # Reduced for testing
+        # For real training, use defaults or larger values:
+        # classifier.train()
     else:
-        print("[ERROR] Failed to extract cells from the test image. Cannot test prediction.")
+        print("Model already exists and loaded. Skipping training.")
+        # Optional: Test recognition on a sample cell if needed
+        # test_cell = cv2.imread("extracted_cells/cell_0_0.png") # Example cell
+        # if test_cell is not None:
+        #     prediction = classifier.recognise(test_cell)
+        #     print(f"Test recognition on cell_0_0.png: {prediction}")
 
-    # Clean up temp file
-    if Path("temp_classifier_test.png").exists():
-        os.remove("temp_classifier_test.png")
-
-    print("\n[INFO] Classifier testing complete.")
+    print("\nClassifier test complete.")

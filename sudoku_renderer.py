@@ -2,357 +2,372 @@
 import cv2
 import numpy as np
 import random
-from pathlib import Path
-import urllib.request
 import os
+from pathlib import Path
+import keras # For MNIST dataset loading
 
 # --- Constants ---
-_DIGITS_URL = ("https://raw.githubusercontent.com/opencv/opencv/"
-               "master/samples/data/digits.png")
-_DIGITS_PNG_PATH = Path(__file__).resolve().parent / "digits.png"
-_DEFAULT_FONTS = [
-    cv2.FONT_HERSHEY_SIMPLEX, cv2.FONT_HERSHEY_PLAIN,
-    cv2.FONT_HERSHEY_DUPLEX, cv2.FONT_HERSHEY_COMPLEX,
-    cv2.FONT_HERSHEY_TRIPLEX, cv2.FONT_HERSHEY_SCRIPT_SIMPLEX,
-    cv2.FONT_HERSHEY_SIMPLEX, # Add more common ones for higher probability
-    cv2.FONT_HERSHEY_SIMPLEX,
-]
+GRID_SIZE = 9
+DEFAULT_BASE_IMAGE_SIZE = 1000 # Initial size before warp
+DEFAULT_CELL_DRAW_SIZE = DEFAULT_BASE_IMAGE_SIZE // GRID_SIZE
+MNIST_IMG_SIZE = 28 # MNIST digits are 28x28
+
+# --- Helper Functions ---
+def _order_points(pts):
+    """Orders 4 points: top-left, top-right, bottom-right, bottom-left."""
+    pts = np.array(pts, dtype="float32")
+    rect = np.zeros((4, 2), dtype="float32")
+    s = pts.sum(axis=1)
+    rect[0] = pts[np.argmin(s)]
+    rect[2] = pts[np.argmax(s)]
+    diff = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(diff)]
+    rect[3] = pts[np.argmax(diff)]
+    return rect
+
+def _load_mnist_digits():
+    """Loads MNIST digits and organizes them by label."""
+    print("Loading MNIST dataset...")
+    try:
+        (x_train, y_train), (x_test, y_test) = keras.datasets.mnist.load_data()
+    except Exception as e:
+        print(f"Error loading MNIST: {e}")
+        print("Please ensure you have an internet connection or the dataset is cached.")
+        # Fallback: Create empty dictionary if MNIST fails
+        return {i: [] for i in range(10)}
+
+    mnist_digits = {i: [] for i in range(10)}
+    for img, label in zip(np.concatenate((x_train, x_test)), np.concatenate((y_train, y_test))):
+        # Invert MNIST (black background to white background like paper)
+        # and add a border to prevent digits touching edges after resize
+        img_inverted = cv2.bitwise_not(img)
+        # Pad slightly before potential resizing later
+        img_padded = cv2.copyMakeBorder(img_inverted, 4, 4, 4, 4, cv2.BORDER_CONSTANT, value=255) # White border
+        mnist_digits[label].append(img_padded)
+    print(f"Loaded {sum(len(v) for v in mnist_digits.values())} MNIST digits.")
+    return mnist_digits
 
 class SudokuRenderer:
     """
-    Generates synthetic Sudoku puzzle images simulating photos of paper puzzles.
-
-    Handles loading digit images (handwritten + fonts), composing the grid,
-    applying perspective warp, noise, and other augmentations.
+    Generates synthetic Sudoku images with various configurable parameters.
     """
     def __init__(self,
-                 base_canvas_size=1000,
-                 grid_line_thickness_range=(1, 5),
-                 cell_padding_fraction=0.15, # Padding around digit within cell
-                 digit_source_ratio=(0.5, 0.5), # (handwritten, font) probability
-                 fonts=None,
-                 noise_level_range=(5, 20),
-                 blur_kernel_range=(0, 3), # 0 means no blur, otherwise odd kernel size (e.g., 1->3x3, 3->7x7)
-                 warp_intensity=0.15, # Max corner shift as fraction of size
-                 paper_color_range=((200, 200, 200), (245, 245, 245)), # BGR range
-                 line_color=(0, 0, 0),
-                 digit_color=(0, 0, 0)):
+                 base_image_size=DEFAULT_BASE_IMAGE_SIZE,
+                 use_mnist=True,
+                 use_fonts=True,
+                 font_faces=None,
+                 line_thickness_range=(1, 5),
+                 digit_size_range=(0.5, 0.8), # Relative to cell size
+                 digit_rotation_range=(-10, 10), # Degrees
+                 digit_offset_range=(-0.1, 0.1), # Relative to cell size
+                 perspective_warp_range=(0.05, 0.20), # Fraction of image size
+                 noise_level_range=(5, 20), # Std dev for Gaussian noise
+                 background_color_range=((200, 240), (200, 240), (200, 240)) # BGR ranges
+                 ):
         """
         Initializes the SudokuRenderer.
 
         Args:
-            base_canvas_size: Initial size of the grid image before warping.
-            grid_line_thickness_range: Min/max thickness for grid lines.
-            cell_padding_fraction: Min padding around digit relative to cell size.
-            digit_source_ratio: Probability tuple for using (handwritten, font) digits.
-            fonts: List of cv2 font constants to use. Defaults to _DEFAULT_FONTS.
-            noise_level_range: Min/max std dev for Gaussian noise.
-            blur_kernel_range: Min/max kernel size index for Gaussian blur (0=off).
-            warp_intensity: Controls the maximum perspective distortion.
-            paper_color_range: Min/max BGR values for the paper background.
-            line_color: BGR color for grid lines.
-            digit_color: BGR color for digits.
+            base_image_size: Size of the square canvas before perspective warp.
+            use_mnist: Whether to use MNIST digits.
+            use_fonts: Whether to use OpenCV fonts for digits.
+            font_faces: List of cv2 font constants to use if use_fonts is True.
+            line_thickness_range: Min/max thickness for grid lines.
+            digit_size_range: Min/max scale factor for digits relative to cell size.
+            digit_rotation_range: Min/max rotation angle for digits.
+            digit_offset_range: Min/max random offset for digits relative to cell size.
+            perspective_warp_range: Min/max intensity for perspective distortion.
+            noise_level_range: Min/max standard deviation for Gaussian noise.
+            background_color_range: Tuple of (min, max) for each BGR channel.
         """
-        self.base_canvas_size = base_canvas_size
-        self.grid_line_thickness_range = grid_line_thickness_range
-        self.cell_padding_fraction = cell_padding_fraction
-        self.digit_source_ratio = digit_source_ratio
-        self.fonts = fonts if fonts else _DEFAULT_FONTS
+        if not use_mnist and not use_fonts:
+            raise ValueError("Must use at least one digit source (MNIST or fonts).")
+
+        self.base_image_size = base_image_size
+        self.cell_draw_size = base_image_size // GRID_SIZE
+        self.use_mnist = use_mnist
+        self.use_fonts = use_fonts
+        self.line_thickness_range = line_thickness_range
+        self.digit_size_range = digit_size_range
+        self.digit_rotation_range = digit_rotation_range
+        self.digit_offset_range = digit_offset_range
+        self.perspective_warp_range = perspective_warp_range
         self.noise_level_range = noise_level_range
-        self.blur_kernel_range = blur_kernel_range
-        self.warp_intensity = warp_intensity
-        self.paper_color_range = paper_color_range
-        self.line_color = line_color
-        self.digit_color = digit_color
-        self.rng = np.random.default_rng()
+        self.background_color_range = background_color_range
 
-        self.handwritten_digits = self._load_handwritten_digits()
+        if use_fonts:
+            self.font_faces = font_faces or [
+                cv2.FONT_HERSHEY_SIMPLEX, cv2.FONT_HERSHEY_PLAIN,
+                cv2.FONT_HERSHEY_DUPLEX, cv2.FONT_HERSHEY_COMPLEX,
+                cv2.FONT_HERSHEY_TRIPLEX, cv2.FONT_HERSHEY_SCRIPT_SIMPLEX,
+                cv2.FONT_HERSHEY_SIMPLEX, cv2.FONT_HERSHEY_SIMPLEX # Weight simplex more
+            ]
+        else:
+            self.font_faces = []
 
-    def _load_handwritten_digits(self):
-        """Loads the 5000 handwritten digits from digits.png."""
-        if not _DIGITS_PNG_PATH.exists():
-            print(f"Downloading {_DIGITS_URL}...")
-            try:
-                urllib.request.urlretrieve(_DIGITS_URL, str(_DIGITS_PNG_PATH))
-            except Exception as e:
-                print(f"Error downloading digits.png: {e}")
-                return {i: [] for i in range(10)} # Return empty dict on failure
-
-        img = cv2.imread(str(_DIGITS_PNG_PATH), cv2.IMREAD_GRAYSCALE)
-        if img is None:
-            print(f"Error reading {_DIGITS_PNG_PATH}")
-            return {i: [] for i in range(10)}
-
-        cells = [np.hsplit(r, 100) for r in np.vsplit(img, 50)]
-        digits_20x20 = np.array(cells, dtype=np.uint8).reshape(-1, 20, 20) # 5000x20x20
-        labels = np.repeat(np.arange(10), 500)
-
-        digit_map = {i: [] for i in range(10)}
-        for img_cell, label in zip(digits_20x20, labels):
-             # Invert (black digit on white bg) and convert to BGR for consistency
-             inverted_cell = cv2.bitwise_not(img_cell)
-             bgr_cell = cv2.cvtColor(inverted_cell, cv2.COLOR_GRAY2BGR)
-             digit_map[label].append(bgr_cell)
-
-        print(f"Loaded {sum(len(v) for v in digit_map.values())} handwritten digit samples.")
-        return digit_map
+        if use_mnist:
+            self.mnist_digits = _load_mnist_digits()
+        else:
+            self.mnist_digits = {i: [] for i in range(10)} # Empty dict if not used
 
     def _get_random_digit_image(self, digit):
-        """Gets a random image for the specified digit (1-9)."""
-        if not (1 <= digit <= 9):
-            raise ValueError("Digit must be between 1 and 9.")
+        """Selects a random image for the given digit (1-9) from available sources."""
+        sources = []
+        if self.use_mnist and digit in self.mnist_digits and self.mnist_digits[digit]:
+            sources.append("mnist")
+        if self.use_fonts:
+            sources.append("font")
 
-        use_handwritten = self.rng.random() < self.digit_source_ratio[0]
-
-        if use_handwritten and self.handwritten_digits.get(digit):
-            # Choose a random handwritten sample
-            img = random.choice(self.handwritten_digits[digit]).copy()
-            # Handwritten digits are already BGR (white bg, black digit)
-            # We might need to adjust color later if digit_color is not black
-            if self.digit_color != (0, 0, 0):
-                 img[np.where((img == [0,0,0]).all(axis=2))] = self.digit_color
-            return img
+        if not sources:
+             # Fallback: render with font even if use_fonts was false, if MNIST failed/empty
+             if not self.font_faces: self.font_faces = [cv2.FONT_HERSHEY_SIMPLEX] # Ensure one font
+             source = "font"
         else:
-            # Generate using a font
-            font_face = random.choice(self.fonts)
-            # Estimate size needed - start large, then scale down
-            font_scale_initial = 5.0
-            thickness = self.rng.integers(1, 4)
-            text = str(digit)
+            source = random.choice(sources)
 
-            (text_w, text_h), baseline = cv2.getTextSize(text, font_face, font_scale_initial, thickness)
-
-            # Create image slightly larger than text
-            margin = 10
-            img_h = text_h + baseline + 2 * margin
-            img_w = text_w + 2 * margin
-            img = np.full((img_h, img_w, 3), (255, 255, 255), dtype=np.uint8) # White background
-
-            # Calculate text origin (bottom-left)
-            org_x = margin
-            org_y = margin + text_h # Y is measured from top
-
-            cv2.putText(img, text, (org_x, org_y), font_face, font_scale_initial,
-                        self.digit_color, thickness, cv2.LINE_AA)
-
-            # Optional: Add slight rotation/shear to font digits? (More complex)
-            # For now, just return the clean font rendering
-            return img
+        if source == "mnist":
+            # Select a random MNIST image for this digit
+            img = random.choice(self.mnist_digits[digit])
+            # Ensure it's BGR for consistency
+            if img.ndim == 2:
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            return img, "mnist"
+        else: # source == "font"
+            # Render using OpenCV font - we'll do this directly on the canvas later
+            return None, "font"
 
 
-    def render_sudoku(self, grid_spec=None, difficulty=0.5):
+    def render_sudoku(self, grid_spec=None, allow_empty=True):
         """
-        Generates a synthetic Sudoku image.
+        Generates a synthetic Sudoku image based on the grid specification.
 
         Args:
-            grid_spec (Optional[np.ndarray]): A 9x9 numpy array with digits (1-9)
-                or 0/None for empty cells. If None, a random grid is generated.
-            difficulty (float): If grid_spec is None, controls the fraction of
-                cells filled (0.0 to 1.0).
+            grid_spec (list[list[int | None]] | None): A 9x9 list of lists.
+                Each element is an int (1-9) or None/0 for an empty cell.
+                If None, a grid with random digits (respecting allow_empty) is generated.
+            allow_empty (bool): If grid_spec is None, allows generating empty cells.
 
         Returns:
-            tuple: (rendered_image, ground_truth_grid, corners_in_rendered)
-                - rendered_image: The final BGR image.
-                - ground_truth_grid: The 9x9 numpy array used (0 for empty).
-                - corners_in_rendered: 4x2 numpy array of the original grid corners
-                                       in the coordinate system of the rendered image.
+            tuple: (warped_image, ground_truth_grid, warped_corners)
+                - warped_image (np.ndarray): The generated BGR image.
+                - ground_truth_grid (np.ndarray): 9x9 NumPy array of the digits placed (0 for empty).
+                - warped_corners (np.ndarray): (4, 2) array of corner coordinates in the warped image.
         """
-        # 1. Determine Ground Truth Grid
+        # 1. Create Ground Truth Grid if not provided
         if grid_spec is None:
-            ground_truth_grid = np.zeros((9, 9), dtype=int)
-            num_filled = int(81 * difficulty)
-            indices = self.rng.choice(81, num_filled, replace=False)
-            rows, cols = np.unravel_index(indices, (9, 9))
-            for r, c in zip(rows, cols):
-                ground_truth_grid[r, c] = self.rng.integers(1, 10) # Digits 1-9
+            ground_truth_grid = np.zeros((GRID_SIZE, GRID_SIZE), dtype=int)
+            for r in range(GRID_SIZE):
+                for c in range(GRID_SIZE):
+                    if allow_empty and random.random() < 0.4: # ~40% empty cells
+                        ground_truth_grid[r, c] = 0
+                    else:
+                        ground_truth_grid[r, c] = random.randint(1, 9)
         else:
-            if not isinstance(grid_spec, np.ndarray) or grid_spec.shape != (9, 9):
-                raise ValueError("grid_spec must be a 9x9 numpy array.")
-            # Replace None with 0 for consistency
-            ground_truth_grid = np.nan_to_num(grid_spec.astype(float)).astype(int)
+            # Convert input grid_spec to numpy array, ensuring None becomes 0
+            ground_truth_grid = np.array([[d if d is not None else 0 for d in row] for row in grid_spec], dtype=int)
+            if ground_truth_grid.shape != (GRID_SIZE, GRID_SIZE):
+                raise ValueError(f"grid_spec must be a {GRID_SIZE}x{GRID_SIZE} list or array.")
 
         # 2. Create Base Canvas
-        bg_color = self.rng.integers(self.paper_color_range[0], self.paper_color_range[1], size=3, endpoint=True).tolist()
-        image = np.full((self.base_canvas_size, self.base_canvas_size, 3), bg_color, dtype=np.uint8)
-        cell_draw_size = self.base_canvas_size // 9
+        bg_color = tuple(random.randint(min_val, max_val) for min_val, max_val in self.background_color_range)
+        image = np.full((self.base_image_size, self.base_image_size, 3), bg_color, dtype=np.uint8)
 
         # 3. Draw Grid Lines
-        min_thick, max_thick = self.grid_line_thickness_range
-        for i in range(10):
-            thickness = self.rng.integers(min_thick, max_thick + 1)
+        line_color = (0, 0, 0) # Black
+        min_line, max_line = self.line_thickness_range
+        for i in range(GRID_SIZE + 1):
+            thickness = random.randint(min_line, max_line -1) # Normal lines
             if i % 3 == 0: # Thicker lines for 3x3 blocks
-                thickness = self.rng.integers(max(min_thick, 2), max_thick + 1) # Ensure thicker is >= min
-            pos = i * cell_draw_size
-            # Clamp position to avoid drawing outside bounds if thickness is large
-            pos = max(0, min(self.base_canvas_size - 1, pos))
-            # Horizontal
-            cv2.line(image, (0, pos), (self.base_canvas_size, pos), self.line_color, thickness)
-            # Vertical
-            cv2.line(image, (pos, 0), (pos, self.base_canvas_size), self.line_color, thickness)
+                thickness = random.randint(max(min_line, max_line -2), max_line)
 
-        # 4. Place Digits
-        for r in range(9):
-            for c in range(9):
+            # Horizontal
+            cv2.line(image, (0, i * self.cell_draw_size), (self.base_image_size, i * self.cell_draw_size), line_color, thickness)
+            # Vertical
+            cv2.line(image, (i * self.cell_draw_size, 0), (i * self.cell_draw_size, self.base_image_size), line_color, thickness)
+
+        # 4. Place Digits in Cells
+        for r in range(GRID_SIZE):
+            for c in range(GRID_SIZE):
                 digit = ground_truth_grid[r, c]
                 if digit == 0: # Skip empty cells
                     continue
 
-                digit_img = self._get_random_digit_image(digit)
-                if digit_img is None: continue # Skip if image loading failed
+                digit_img, source = self._get_random_digit_image(digit)
 
                 # Calculate target size for the digit within the cell
-                padding = int(cell_draw_size * self.cell_padding_fraction)
-                max_digit_h = cell_draw_size - 2 * padding
-                max_digit_w = cell_draw_size - 2 * padding
+                scale = random.uniform(*self.digit_size_range)
+                target_h = int(self.cell_draw_size * scale)
+                target_w = int(self.cell_draw_size * scale) # Keep aspect ratio roughly square for simplicity
 
-                if max_digit_h <= 0 or max_digit_w <= 0: continue # Cell too small
+                # Cell center coordinates
+                cell_center_x = c * self.cell_draw_size + self.cell_draw_size // 2
+                cell_center_y = r * self.cell_draw_size + self.cell_draw_size // 2
 
-                # Resize digit image preserving aspect ratio
-                h_orig, w_orig = digit_img.shape[:2]
-                scale = min(max_digit_w / w_orig, max_digit_h / h_orig)
-                new_w, new_h = int(w_orig * scale), int(h_orig * scale)
+                # Random offset
+                offset_x = int(random.uniform(*self.digit_offset_range) * self.cell_draw_size)
+                offset_y = int(random.uniform(*self.digit_offset_range) * self.cell_draw_size)
+                final_center_x = cell_center_x + offset_x
+                final_center_y = cell_center_y + offset_y
 
-                if new_w <= 0 or new_h <= 0: continue # Resized too small
+                # Random rotation
+                angle = random.uniform(*self.digit_rotation_range)
 
-                resized_digit = cv2.resize(digit_img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                if source == "mnist" and digit_img is not None:
+                    # Resize MNIST image
+                    resized_digit = cv2.resize(digit_img, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
-                # Calculate placement position (top-left corner) within the cell
-                cell_top = r * cell_draw_size
-                cell_left = c * cell_draw_size
+                    # Rotate the digit image
+                    M = cv2.getRotationMatrix2D((target_w / 2, target_h / 2), angle, 1.0)
+                    rotated_digit = cv2.warpAffine(resized_digit, M, (target_w, target_h), borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255)) # White background
 
-                # Center the digit within the available space (cell - padding)
-                offset_x = (cell_draw_size - new_w) // 2
-                offset_y = (cell_draw_size - new_h) // 2
+                    # Create a mask for blending (assuming white background in rotated_digit)
+                    gray_digit = cv2.cvtColor(rotated_digit, cv2.COLOR_BGR2GRAY)
+                    _, mask = cv2.threshold(gray_digit, 250, 255, cv2.THRESH_BINARY_INV) # Mask is black digit on white bg
 
-                # Add small random offset
-                max_jitter = padding // 2
-                jitter_x = self.rng.integers(-max_jitter, max_jitter + 1)
-                jitter_y = self.rng.integers(-max_jitter, max_jitter + 1)
+                    # Calculate top-left corner for pasting
+                    paste_x = final_center_x - target_w // 2
+                    paste_y = final_center_y - target_h // 2
 
-                paste_x = cell_left + offset_x + jitter_x
-                paste_y = cell_top + offset_y + jitter_y
+                    # Ensure paste coordinates are within bounds
+                    paste_x = max(0, paste_x)
+                    paste_y = max(0, paste_y)
 
-                # Ensure placement is within bounds
-                paste_x = max(0, paste_x)
-                paste_y = max(0, paste_y)
+                    # Get the region of interest (ROI) on the main image
+                    roi = image[paste_y : paste_y + target_h, paste_x : paste_x + target_w]
 
-                # Calculate end coordinates, careful not to exceed image bounds
-                end_row = min(paste_y + new_h, self.base_canvas_size)
-                end_col = min(paste_x + new_w, self.base_canvas_size)
-                # Adjust height/width of digit slice if clipping occurred
-                slice_h = end_row - paste_y
-                slice_w = end_col - paste_x
+                    # Adjust digit/mask size if pasting goes out of bounds
+                    roi_h, roi_w = roi.shape[:2]
+                    if roi_h != target_h or roi_w != target_w:
+                        rotated_digit = rotated_digit[:roi_h, :roi_w]
+                        mask = mask[:roi_h, :roi_w]
 
-                if slice_h <= 0 or slice_w <= 0: continue # Nothing to paste
+                    # Blend using the mask
+                    inv_mask = cv2.bitwise_not(mask)
+                    img_bg = cv2.bitwise_and(roi, roi, mask=inv_mask)
+                    img_fg = cv2.bitwise_and(rotated_digit, rotated_digit, mask=mask)
+                    dst = cv2.add(img_bg, img_fg)
+                    image[paste_y : paste_y + target_h, paste_x : paste_x + target_w] = dst
 
-                # Create mask for transparency (assuming white background in digit img)
-                # Convert resized digit to grayscale for masking
-                gray_digit = cv2.cvtColor(resized_digit[:slice_h, :slice_w], cv2.COLOR_BGR2GRAY)
-                # Mask is where the digit is NOT white (i.e., the digit itself)
-                mask = cv2.threshold(gray_digit, 240, 255, cv2.THRESH_BINARY_INV)[1]
+                elif source == "font":
+                    font_face = random.choice(self.font_faces)
+                    digit_str = str(digit)
+                    # Adjust font scale dynamically to roughly match target size
+                    # This is approximate and might need tuning
+                    font_scale = cv2.getFontScaleFromHeight(font_face, target_h, thickness=2) # Estimate scale
+                    font_thickness = random.randint(1, 3)
+                    text_color = (random.randint(0,50), random.randint(0,50), random.randint(0,50)) # Dark color
 
-                # Paste using mask
-                roi = image[paste_y:end_row, paste_x:end_col]
-                # Ensure mask has 3 channels if needed, or apply per channel
-                mask_inv = cv2.bitwise_not(mask)
-                img_bg = cv2.bitwise_and(roi, roi, mask=mask_inv)
-                img_fg = cv2.bitwise_and(resized_digit[:slice_h, :slice_w], resized_digit[:slice_h, :slice_w], mask=mask)
+                    (text_width, text_height), baseline = cv2.getTextSize(digit_str, font_face, font_scale, font_thickness)
 
-                image[paste_y:end_row, paste_x:end_col] = cv2.add(img_bg, img_fg)
+                    # Calculate origin for putText (bottom-left)
+                    origin_x = final_center_x - text_width // 2
+                    origin_y = final_center_y + text_height // 2
 
+                    # Apply rotation using warpAffine for text is complex,
+                    # cv2.putText doesn't support rotation directly.
+                    # For simplicity, we'll skip rotation for font-based digits for now,
+                    # or accept that the offset/size variation provides some diversity.
+                    # TODO: Implement text rotation if crucial (e.g., render text on separate canvas, rotate, then blend)
 
-        # 5. Apply Noise
-        std_dev = self.rng.uniform(self.noise_level_range[0], self.noise_level_range[1])
-        noise = self.rng.normal(0, std_dev, image.shape).astype(np.float32)
-        noisy_image = image.astype(np.float32) + noise
-        image = np.clip(noisy_image, 0, 255).astype(np.uint8)
+                    cv2.putText(image, digit_str, (origin_x, origin_y), font_face, font_scale, text_color, font_thickness, cv2.LINE_AA)
 
-        # 6. Apply Blur
-        blur_k_idx = self.rng.integers(self.blur_kernel_range[0], self.blur_kernel_range[1] + 1)
-        if blur_k_idx > 0:
-            ksize = blur_k_idx * 2 + 1 # Ensure odd kernel size (3, 5, 7...)
-            image = cv2.GaussianBlur(image, (ksize, ksize), 0)
+        # 5. Add Gaussian Noise
+        mean = 0
+        std_dev = random.uniform(*self.noise_level_range)
+        noise = np.random.normal(mean, std_dev, image.shape).astype(np.float32)
+        noisy_image = np.clip(image.astype(np.float32) + noise, 0, 255)
+        image = noisy_image.astype(np.uint8)
 
-        # 7. Apply Perspective Warp
+        # 6. Apply Perspective Warp
         h, w = image.shape[:2]
-        original_corners = np.array([
-            [0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]
-        ], dtype="float32")
+        original_corners = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], dtype="float32")
 
-        max_shift_x = w * self.warp_intensity
-        max_shift_y = h * self.warp_intensity
+        warp_intensity = random.uniform(*self.perspective_warp_range)
+        max_shift_x = w * warp_intensity
+        max_shift_y = h * warp_intensity
 
-        # Encourage lower-angle views: shift top corners more inward, bottom corners less so
-        # or shift top corners down, bottom corners up slightly
-        top_shift_x = max_shift_x * self.rng.uniform(0.5, 1.0)
-        top_shift_y = max_shift_y * self.rng.uniform(0.5, 1.0) # Shift top corners down
-        bottom_shift_x = max_shift_x * self.rng.uniform(0.1, 0.5)
-        bottom_shift_y = max_shift_y * self.rng.uniform(0.0, 0.3) # Shift bottom corners up slightly
-
+        # Create more varied perspective shifts, including potentially stronger top/bottom shifts
+        # to simulate low angles
         shifted_corners = np.array([
-            [self.rng.uniform(0, top_shift_x), self.rng.uniform(0, top_shift_y)], # Top-left
-            [w - 1 - self.rng.uniform(0, top_shift_x), self.rng.uniform(0, top_shift_y)], # Top-right
-            [w - 1 - self.rng.uniform(-bottom_shift_x/2, bottom_shift_x), h - 1 - self.rng.uniform(0, bottom_shift_y)], # Bottom-right
-            [self.rng.uniform(-bottom_shift_x/2, bottom_shift_x), h - 1 - self.rng.uniform(0, bottom_shift_y)]  # Bottom-left
+            [random.uniform(0, max_shift_x * 0.8), random.uniform(0, max_shift_y)], # Top-left
+            [w - 1 - random.uniform(0, max_shift_x * 0.8), random.uniform(0, max_shift_y)], # Top-right
+            [w - 1 - random.uniform(-max_shift_x * 0.2, max_shift_x), h - 1 - random.uniform(0, max_shift_y * 0.5)], # Bottom-right
+            [random.uniform(-max_shift_x * 0.2, max_shift_x), h - 1 - random.uniform(0, max_shift_y * 0.5)]  # Bottom-left
         ], dtype="float32")
 
-        # Ensure corners form a valid quadrilateral (basic check: prevent self-intersection)
-        # A more robust check might be needed, but this prevents extreme cases.
-        shifted_corners = np.clip(shifted_corners, -w*0.1, w*1.1) # Allow slight overshoot
+        # Ensure corners don't collapse or go wildly out of bounds (basic sanity check)
+        min_dist = w * 0.1 # Minimum distance between adjacent corners horizontally
+        if abs(shifted_corners[0, 0] - shifted_corners[1, 0]) < min_dist or \
+           abs(shifted_corners[3, 0] - shifted_corners[2, 0]) < min_dist:
+            # Reset to less aggressive warp if corners get too close horizontally
+             shifted_corners = original_corners + np.random.uniform(-w*0.05, w*0.05, size=(4,2))
+             shifted_corners = np.clip(shifted_corners, 0, [w-1, h-1])
+             shifted_corners = shifted_corners.astype("float32")
+
 
         matrix = cv2.getPerspectiveTransform(original_corners, shifted_corners)
-        # Determine output size - let's keep it the same as the base canvas for simplicity
-        # Or calculate bounds of shifted corners? Keep it simple for now.
-        warped_image = cv2.warpPerspective(image, matrix, (w, h), borderMode=cv2.BORDER_REPLICATE)
+        # Determine output size based on the max extent of shifted corners
+        # This makes the warped image contain the whole grid without excessive padding
+        x_coords = shifted_corners[:, 0]
+        y_coords = shifted_corners[:, 1]
+        out_w = int(np.ceil(max(x_coords)))
+        out_h = int(np.ceil(max(y_coords)))
+        out_w = max(out_w, 100) # Ensure minimum size
+        out_h = max(out_h, 100)
 
-        # The 'corners_in_rendered' are simply the 'shifted_corners'
-        corners_in_rendered = shifted_corners
+        # Adjust transform matrix for the new output size if needed (usually not necessary here)
+        # matrix[0, 2] -= min(x_coords) # Shift origin if min_x < 0 (not typical here)
+        # matrix[1, 2] -= min(y_coords) # Shift origin if min_y < 0
 
-        return warped_image, ground_truth_grid, corners_in_rendered
+        warped_image = cv2.warpPerspective(image, matrix, (out_w, out_h), borderMode=cv2.BORDER_REPLICATE)
 
-# --- Example Usage ---
+        # The 'warped_corners' should correspond to the original grid corners in the *new* warped image coordinates
+        # Since warpPerspective calculates coordinates relative to the output size, the shifted_corners are already correct.
+        final_warped_corners = shifted_corners
+
+        return warped_image, ground_truth_grid, final_warped_corners
+
+# --- Example Usage (for testing) ---
 if __name__ == "__main__":
-    print("[INFO] Initializing Sudoku Renderer...")
-    renderer = SudokuRenderer(warp_intensity=0.2, digit_source_ratio=(0.7, 0.3)) # More handwritten
+    print("Testing SudokuRenderer...")
+    renderer = SudokuRenderer(use_mnist=True, use_fonts=True)
 
-    print("[INFO] Generating random Sudoku image...")
-    # Example: Generate a random grid with ~40% filled cells
-    rendered_img, truth_grid, corners = renderer.render_sudoku(difficulty=0.4)
+    # Example 1: Generate a random grid
+    print("Generating random Sudoku image...")
+    random_img, random_gt, random_corners = renderer.render_sudoku(allow_empty=True)
+    print("Ground Truth Grid (Random):")
+    print(random_gt)
+    print("Warped Corners (Random):")
+    print(random_corners)
+    cv2.imwrite("rendered_sudoku_random.png", random_img)
+    print("Saved random_img to rendered_sudoku_random.png")
 
-    print("[INFO] Ground Truth Grid (0=empty):")
-    print(truth_grid)
-    # print("\n[INFO] Corners in Rendered Image:")
-    # print(corners)
+    # Example 2: Generate a specific grid
+    print("\nGenerating specific Sudoku image...")
+    specific_grid_spec = [
+        [5, 3, None, None, 7, None, None, None, None],
+        [6, None, None, 1, 9, 5, None, None, None],
+        [None, 9, 8, None, None, None, None, 6, None],
+        [8, None, None, None, 6, None, None, None, 3],
+        [4, None, None, 8, None, 3, None, None, 1],
+        [7, None, None, None, 2, None, None, None, 6],
+        [None, 6, None, None, None, None, 2, 8, None],
+        [None, None, None, 4, 1, 9, None, None, 5],
+        [None, None, None, None, 8, None, None, 7, 9]
+    ]
+    specific_img, specific_gt, specific_corners = renderer.render_sudoku(grid_spec=specific_grid_spec)
+    print("Ground Truth Grid (Specific):")
+    print(specific_gt)
+    cv2.imwrite("rendered_sudoku_specific.png", specific_img)
+    print("Saved specific_img to rendered_sudoku_specific.png")
 
-    # Draw detected corners on the image for visualization
-    vis_img = rendered_img.copy()
-    for i in range(4):
-        pt1 = tuple(corners[i].astype(int))
-        pt2 = tuple(corners[(i + 1) % 4].astype(int))
-        cv2.line(vis_img, pt1, pt2, (0, 255, 0), 2)
-        cv2.circle(vis_img, pt1, 5, (0, 0, 255), -1)
+    # Draw corners on the specific image for visualization
+    img_with_corners = specific_img.copy()
+    for i, p in enumerate(specific_corners):
+        pt = tuple(p.astype(int))
+        cv2.circle(img_with_corners, pt, 10, (0, 0, 255), -1) # Red circles
+        cv2.putText(img_with_corners, str(i), (pt[0]+5, pt[1]-5), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,0,0), 2) # Blue text
+    cv2.imwrite("rendered_sudoku_specific_corners.png", img_with_corners)
+    print("Saved specific_img with corners to rendered_sudoku_specific_corners.png")
 
-    print("[INFO] Displaying generated Sudoku image with corners...")
-    cv2.imshow("Generated Sudoku", vis_img)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
-
-    # Example: Generate a specific grid
-    print("\n[INFO] Generating specific Sudoku image...")
-    specific_grid = np.array([
-        [5, 3, 0, 0, 7, 0, 0, 0, 0],
-        [6, 0, 0, 1, 9, 5, 0, 0, 0],
-        [0, 9, 8, 0, 0, 0, 0, 6, 0],
-        [8, 0, 0, 0, 6, 0, 0, 0, 3],
-        [4, 0, 0, 8, 0, 3, 0, 0, 1],
-        [7, 0, 0, 0, 2, 0, 0, 0, 6],
-        [0, 6, 0, 0, 0, 0, 2, 8, 0],
-        [0, 0, 0, 4, 1, 9, 0, 0, 5],
-        [0, 0, 0, 0, 8, 0, 0, 7, 9]
-    ])
-    rendered_img_spec, _, _ = renderer.render_sudoku(grid_spec=specific_grid)
-    cv2.imshow("Specific Sudoku", rendered_img_spec)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
-
-    print("[INFO] Renderer testing complete.")
+    print("\nRenderer test complete.")
