@@ -31,7 +31,7 @@ def print_sudoku_grid(
 
     for r in range(GRID_SIZE):
         if r > 0 and r % 3 == 0:
-            print("|-----+-----+-----|")
+            print("|-----+-------+-----|")
 
         tokens = []
         for c in range(GRID_SIZE):
