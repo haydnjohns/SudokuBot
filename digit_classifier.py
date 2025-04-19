@@ -331,7 +331,7 @@ class DigitClassifier:
              return
 
         callback_list = [
-            callbacks.EarlyStopping(monitor='val_loss', patience=7, verbose=1, restore_best_weights=True),
+            callbacks.EarlyStopping(monitor='val_loss', patience=3, verbose=1, restore_best_weights=True),
             callbacks.ModelCheckpoint(str(self.model_path), monitor='val_loss', save_best_only=True, verbose=1),
             callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=3, min_lr=1e-6, verbose=1)
         ]
