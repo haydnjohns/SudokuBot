@@ -22,8 +22,8 @@ MODEL_FILENAME = "sudoku_digit_classifier_cnn_v4.keras" # v4 for oversampling
 MODEL_INPUT_SHAPE = (28, 28, 1)
 NUM_CLASSES = 11
 EMPTY_LABEL = 10
-STEPS_PER_EPOCH = 500
-EPOCHS = 30 # Might need fewer epochs if oversampling converges faster
+STEPS_PER_EPOCH = 10
+EPOCHS = 10 # Might need fewer epochs if oversampling converges faster
 BATCH_SIZE = 128
 VALIDATION_STEPS = 100
 TARGET_CELL_CONTENT_SIZE = 20
@@ -349,7 +349,6 @@ if __name__ == "__main__":
     classifier = DigitClassifier()
 
     if classifier.model is None:
-        # classifier.train(epochs=10, steps_per_epoch=100, validation_steps=20) # Quicker test
         classifier.train() # Use defaults
     else:
         print("Model already exists and loaded. Skipping training.")
