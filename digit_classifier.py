@@ -49,7 +49,7 @@ class DigitClassifier:
             layers.RandomTranslation(0.10, 0.10, fill_mode="constant"),
             layers.RandomZoom(0.10, 0.10, fill_mode="constant"),
             layers.RandomContrast(0.2),
-            layers.GaussianNoise(0.8),
+            layers.GaussianNoise(0.1),
         ])
 
         def add_channel(x):         # Keras likes (h,w,1) not (h,w)
