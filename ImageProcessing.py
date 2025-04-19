@@ -11,6 +11,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from skimage.segmentation import clear_border
 
 _DIGITS_URL = ("https://raw.githubusercontent.com/opencv/opencv/"
                "master/samples/data/digits.png")
@@ -227,6 +228,13 @@ def _recognise_single_digit(cell):
                                    11, 2)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
     thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
+    cv2.imshow("Thresh", thresh)
+    cv2.waitKey(0)
+
+    # thresh = clear_border(thresh)
+    # thresh = (thresh * 255).astype(np.uint8)
+    # cv2.imshow("Clean", thresh)
+    # cv2.waitKey(0)
 
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL,
                                    cv2.CHAIN_APPROX_SIMPLE)
@@ -306,5 +314,5 @@ def main(path):
 
 
 if __name__ == "__main__":
-    path = "sodoku_image.png" if len(sys.argv) == 1 else sys.argv[1]
+    path = "sample_images/digit_5_img_0.png" if len(sys.argv) == 1 else sys.argv[1]
     main(path)
