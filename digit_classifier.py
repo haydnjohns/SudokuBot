@@ -218,14 +218,14 @@ class DigitClassifier:
             for _ in range(2):
                 x = layers.Conv2D(filters, 3, padding="same")(x)
                 x = layers.BatchNormalization()(x)
-                x = layers.Activation("relu")(x)
+                x = layers.Activation("gelu")(x)
             x = layers.MaxPooling2D(2)(x)
             x = layers.Dropout(0.25)(x)
 
         x = layers.Flatten()(x)
         x = layers.Dense(128)(x)
         x = layers.BatchNormalization()(x)
-        x = layers.Activation("relu")(x)
+        x = layers.Activation("gelu")(x)
         x = layers.Dropout(0.5)(x)
 
         out = layers.Dense(NUM_CLASSES, activation="softmax")(x)
