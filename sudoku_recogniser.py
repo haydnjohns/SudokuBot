@@ -158,7 +158,7 @@ def main():
         print("\nStarting classifier training...")
         try:
             # Use reasonably robust parameters for default training
-            classifier.train(epochs=25, steps_per_epoch=100, batch_size=128)
+            classifier.train(epochs=10, steps_per_epoch=10, batch_size=128)
             if classifier.model is None:
                  print("\n[Error] Classifier training failed. Exiting.")
                  sys.exit(1)
