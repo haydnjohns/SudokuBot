@@ -25,6 +25,7 @@ NUM_CLASSES = 11 # Digits 0-9 + Empty class
 EMPTY_LABEL = 10 # Label for the empty class
 DEFAULT_TRAIN_SAMPLES = 10000 # Increase number of training Sudokus
 DEFAULT_VAL_SPLIT = 0.15
+GRID_SIZE = 9
 TARGET_CELL_CONTENT_SIZE = 20 # Target size of digit within the 28x28 frame
 
 class DigitClassifier:
@@ -342,7 +343,7 @@ class DigitClassifier:
 
         if isinstance(probabilities, torch.Tensor):
             # Add CPU transfer if applicable: .cpu()
-            probabilities = probabilities.numpy()
+            probabilities = probabilities.cpu().detach().numpy()
 
         # 4. Interpret
         predicted_class = int(np.argmax(probabilities))
