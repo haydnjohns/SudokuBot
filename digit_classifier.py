@@ -24,6 +24,7 @@ NUM_CLASSES = 11 # Digits 0-9 + Empty class
 EMPTY_LABEL = 10 # Label for the empty class
 DEFAULT_TRAIN_SAMPLES = 5000 # Number of synthetic Sudokus to generate for training
 DEFAULT_VAL_SPLIT = 0.15
+GRID_SIZE = 9
 
 class DigitClassifier:
     """
