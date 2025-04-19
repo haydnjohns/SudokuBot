@@ -197,12 +197,34 @@ class SudokuRenderer:
         return np.array(img_pil)
 
     # --------------- perspective tilt ------------------------------- #
+    # --------------- perspective tilt ------------------------------- #
     def _perspective_warp(self, img: np.ndarray) -> np.ndarray:
         h, w = img.shape[:2]
         # four source pts at the corners
         src = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
-        max_x, max_y = w * 0.12, h * 0.12
-        dst = src + self.rng.uniform(-max_x, max_x, src.shape).astype(np.float32)
+        # Define max displacement based on image size (original logic)
+        # Using max_x for both x and y simplifies, adjust if separate needed
+        max_offset = min(w, h) * 0.12 # Use a single max offset relative to min dim
+
+        # Generate an array of random offsets with the same shape as src (4, 2)
+        # Values will be between -max_offset and +max_offset
+        random_offsets = np.random.uniform(
+            low=-max_offset,
+            high=max_offset,
+            size=src.shape
+        )
+        # Add the random offsets to the original corner points
+        # Ensure the result is float32, consistent with src and required by cv2.getPerspectiveTransform
+        dst = (src + random_offsets).astype(np.float32)
+
         M = cv2.getPerspectiveTransform(src, dst)
-        out = cv2.warpPerspective(img, M, (w, h), borderValue=255)
+        # Specify border mode and value explicitly for clarity and control
+        # Using white border to simulate paper extending beyond the grid
+        out = cv2.warpPerspective(
+            img,
+            M,
+            (w, h),
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(255, 255, 255) # White border
+        )
         return out
