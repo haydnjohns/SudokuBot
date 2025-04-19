@@ -2,6 +2,8 @@
 Command-line utility to detect a Sudoku grid in an image and recognise its digits.
 """
 
+from __future__ import annotations
+
 import sys
 import time
 from pathlib import Path
@@ -10,7 +12,7 @@ from typing import Tuple, Optional
 import cv2
 import numpy as np
 
-from digit_classifier import MODEL_FILENAME, DigitClassifier
+import digit_classifier
 from digit_extractor import GRID_SIZE, extract_cells_from_image
 
 FINAL_CONFIDENCE_THRESHOLD = 0.80
@@ -85,7 +87,7 @@ def display_results_on_image(
 
 def recognise_sudoku(
     img_path: Path,
-    classifier: DigitClassifier
+    classifier: digit_classifier.DigitClassifier
 ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """
     Extract cells and run the classifier on each one.
@@ -122,7 +124,7 @@ def main() -> None:
         print(f"Image not found: {img_path}")
         sys.exit(1)
 
-    classifier = DigitClassifier(model_path=MODEL_FILENAME)
+    classifier = digit_classifier.DigitClassifier(model_path=digit_classifier.MODEL_FILENAME)
     if classifier.model is None:
         print("Model missing—training required.")
         classifier.train()
