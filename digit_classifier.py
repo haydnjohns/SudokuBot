@@ -30,7 +30,7 @@ class DigitClassifier:
     def __init__(self,
                  *,
                  device: torch.device | str | None = None,
-                 train: bool = False,
+                 train: bool = True,
                  n_boards: int = 2000,
                  force_retrain: bool = False,
                  ):
