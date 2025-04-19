@@ -1,6 +1,6 @@
 # sudoku_renderer.py
 """
-Synthetic Sudoku image generator used for on‑the‑fly training data creation.
+Synthetic Sudoku image generator used for on-the-fly training data creation.
 """
 from __future__ import annotations
 
@@ -50,9 +50,6 @@ class SudokuRenderer:
     def __init__(self) -> None:
         self.mnist: dict[int, list[np.ndarray]] | None = None
 
-    # --------------------------------------------------------------------- #
-    #  Internals                                                            #
-    # --------------------------------------------------------------------- #
     def _digit_source(self, digit: int) -> Tuple[np.ndarray | None, str]:
         srcs = []
         if self.mnist is None:
@@ -69,9 +66,6 @@ class SudokuRenderer:
             return img, "mnist"
         return None, "font"
 
-    # --------------------------------------------------------------------- #
-    #  Public                                                               #
-    # --------------------------------------------------------------------- #
     def render_sudoku(
         self,
         grid_spec: list[list[int | None]] | np.ndarray | None = None,
@@ -79,7 +73,6 @@ class SudokuRenderer:
         allow_empty: bool = True,
     ):
         """Return (image, gt_grid, warped_corners)."""
-        # ground truth ---------------------------------------------------- #
         if grid_spec is None:
             gt = np.zeros((GRID_SIZE, GRID_SIZE), int)
             for r in range(GRID_SIZE):
@@ -90,18 +83,15 @@ class SudokuRenderer:
         else:
             gt = np.asarray([[d or 0 for d in row] for row in grid_spec], int)
 
-        # canvas ----------------------------------------------------------- #
         bg_color = tuple(random.randint(200, 240) for _ in range(3))
         img = np.full((BASE_IMAGE_SIZE, BASE_IMAGE_SIZE, 3), bg_color, np.uint8)
 
-        # grid lines ------------------------------------------------------- #
         for i in range(GRID_SIZE + 1):
             major = i % 3 == 0
             thick = random.randint(3 if major else 1, 5 if major else 3)
             cv2.line(img, (0, i * CELL_SIZE), (BASE_IMAGE_SIZE, i * CELL_SIZE), (0, 0, 0), thick)
             cv2.line(img, (i * CELL_SIZE, 0), (i * CELL_SIZE, BASE_IMAGE_SIZE), (0, 0, 0), thick)
 
-        # digits ----------------------------------------------------------- #
         for r in range(GRID_SIZE):
             for c in range(GRID_SIZE):
                 d = gt[r, c]
@@ -138,7 +128,7 @@ class SudokuRenderer:
                     bg = cv2.bitwise_and(roi, roi, mask=mask_inv)
                     fg = cv2.bitwise_and(digit, digit, mask=mask[: roi.shape[0], : roi.shape[1]])
                     img[y0 : y0 + roi.shape[0], x0 : x0 + roi.shape[1]] = cv2.add(bg, fg)
-                else:  # font
+                else:
                     font = cv2.FONT_HERSHEY_SIMPLEX
                     thickness = random.randint(1, 3)
                     font_scale = cv2.getFontScaleFromHeight(font, tgt_h, thickness) * 0.8
@@ -156,11 +146,9 @@ class SudokuRenderer:
                         cv2.LINE_AA,
                     )
 
-        # noise ------------------------------------------------------------ #
         noise = np.random.normal(0, random.uniform(5, 20), img.shape).astype(np.float32)
         img = np.clip(img.astype(np.float32) + noise, 0, 255).astype(np.uint8)
 
-        # perspective ------------------------------------------------------ #
         h, w = img.shape[:2]
         orig = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], "float32")
         shift = random.uniform(0.05, 0.2)
@@ -183,9 +171,6 @@ class SudokuRenderer:
         return warped, gt, dst
 
 
-# --------------------------------------------------------------------------- #
-#  Deterministic test example                                                 #
-# --------------------------------------------------------------------------- #
 def generate_and_save_test_example(
     prefix: str = "epoch_test_sudoku", *, force: bool = False
 ):

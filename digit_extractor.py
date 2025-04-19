@@ -4,6 +4,7 @@ Find a Sudoku grid in an image, rectify it and split it into 81 cell images.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import List, Tuple
 
@@ -14,9 +15,6 @@ GRID_SIZE = 9
 DEFAULT_RECTIFIED_SIZE = 450
 
 
-# --------------------------------------------------------------------------- #
-#  Helpers                                                                    #
-# --------------------------------------------------------------------------- #
 def _order_points(pts: np.ndarray) -> np.ndarray:
     """Return points ordered TL, TR, BR, BL."""
     pts = pts.reshape(4, 2).astype("float32")
@@ -32,13 +30,10 @@ def _order_points(pts: np.ndarray) -> np.ndarray:
     return rect
 
 
-# --------------------------------------------------------------------------- #
-#  Core functionality                                                         #
-# --------------------------------------------------------------------------- #
 def find_sudoku_grid_contour(
     img: np.ndarray, *, debug_dir: Path | None = None
 ) -> np.ndarray:
-    """Return a four‑point contour of the outer Sudoku boundary."""
+    """Return a four-point contour of the outer Sudoku boundary."""
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img.copy()
 
     if debug_dir:
@@ -82,7 +77,7 @@ def find_sudoku_grid_contour(
 def rectify_grid(
     img: np.ndarray, contour: np.ndarray, *, size: int = DEFAULT_RECTIFIED_SIZE
 ) -> np.ndarray | None:
-    """Perspective‑correct the Sudoku grid."""
+    """Perspective-correct the Sudoku grid."""
     try:
         src = _order_points(contour)
         dst = np.array(
@@ -127,7 +122,7 @@ def split_into_cells(
 def extract_cells_from_image(
     img_or_path, *, size: int = DEFAULT_RECTIFIED_SIZE, debug: bool = False
 ):
-    """High‑level convenience function."""
+    """High-level convenience function."""
     if isinstance(img_or_path, (str, Path)):
         img = cv2.imread(str(img_or_path))
         if img is None:

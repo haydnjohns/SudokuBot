@@ -1,14 +1,13 @@
 # digit_classifier.py
 """
-Convolutional‑NN based digit classifier used by the Sudoku recogniser.
+Convolutional-NN based digit classifier used by the Sudoku recogniser.
 
-The module can be executed directly to (re‑)train a model and run a
-quick smoke‑test afterwards.
+The module can be executed directly to (re-)train a model and run a
+quick smoke-test afterwards.
 """
 from __future__ import annotations
 
 import gc
-import math
 import os
 import random
 from pathlib import Path
@@ -20,14 +19,8 @@ import numpy as np
 import torch
 from keras import callbacks, layers, models
 
-# --------------------------------------------------------------------------- #
-#  Configure Keras backend – keep this on top to make sure it applies early.  #
-# --------------------------------------------------------------------------- #
 os.environ["KERAS_BACKEND"] = "torch"
 
-# --------------------------------------------------------------------------- #
-#  Local imports (kept late to avoid circular / backend initialisation woes). #
-# --------------------------------------------------------------------------- #
 from sudoku_renderer import SudokuRenderer, generate_and_save_test_example
 from digit_extractor import (
     GRID_SIZE,
@@ -40,13 +33,9 @@ from sudoku_recogniser import (
     print_sudoku_grid,
 )
 
-# --------------------------------------------------------------------------- #
-#  Module constants                                                           #
-# --------------------------------------------------------------------------- #
 MODEL_FILENAME = "sudoku_digit_classifier_cnn.keras"
 MODEL_INPUT_SHAPE = (28, 28, 1)
-
-NUM_CLASSES = 11          # 0‑9 + one “empty” class
+NUM_CLASSES = 11          # 0-9 + one “empty” class
 EMPTY_LABEL = 10          # index of the empty class
 TARGET_CELL_CONTENT_SIZE = 24
 TARGET_DIGIT_RATIO = 1.5  # digits : empties within a batch
@@ -56,9 +45,6 @@ STEPS_PER_EPOCH = 150
 BATCH_SIZE = 128
 VALIDATION_STEPS = 50
 
-# --------------------------------------------------------------------------- #
-#  Data generator                                                             #
-# --------------------------------------------------------------------------- #
 DataBatch = Tuple[np.ndarray, np.ndarray]
 
 
@@ -70,7 +56,7 @@ def sudoku_data_generator(
     target_digit_ratio: float = TARGET_DIGIT_RATIO,
 ) -> Generator[DataBatch, None, None]:
     """
-    Yields balanced batches of *single‑cell* images and labels generated on‑the‑fly.
+    Yields balanced batches of single-cell images and labels generated on-the-fly.
     """
     grid_size_sq = GRID_SIZE * GRID_SIZE
     target_digits = int(batch_size * (target_digit_ratio / (1 + target_digit_ratio)))
@@ -130,7 +116,7 @@ def sudoku_data_generator(
                     break
 
         if not x_batch:
-            continue  # try again
+            continue
 
         x_arr = np.expand_dims(np.asarray(x_batch, dtype="float32"), -1)
         y_arr = np.asarray(y_batch, dtype="int64")
@@ -141,9 +127,6 @@ def sudoku_data_generator(
         gc.collect()
 
 
-# --------------------------------------------------------------------------- #
-#  Epoch‑end callback                                                         #
-# --------------------------------------------------------------------------- #
 class EpochTestCallback(callbacks.Callback):
     """Evaluate the model on a fixed Sudoku after every *frequency* epochs."""
 
@@ -174,7 +157,6 @@ class EpochTestCallback(callbacks.Callback):
 
         self.preprocessed = np.expand_dims(np.asarray(processed, dtype="float32"), -1)
 
-    # --------------------------------------------------------------------- #
     def on_epoch_end(self, epoch: int, logs: dict | None = None) -> None:
         if self.preprocessed is None or (epoch + 1) % self.frequency:
             return
@@ -205,9 +187,6 @@ class EpochTestCallback(callbacks.Callback):
         print("--- end ---\n")
 
 
-# --------------------------------------------------------------------------- #
-#  DigitClassifier                                                             #
-# --------------------------------------------------------------------------- #
 class DigitClassifier:
     """
     Wraps model loading, training and inference.
@@ -235,9 +214,6 @@ class DigitClassifier:
             except Exception as exc:
                 print(f"[Error] Could not load model: {exc}")
 
-    # --------------------------------------------------------------------- #
-    #  Pre‑processing                                                       #
-    # --------------------------------------------------------------------- #
     def _preprocess_cell_for_model(
         self, cell: np.ndarray
     ) -> np.ndarray | None:
@@ -290,9 +266,6 @@ class DigitClassifier:
 
         return canvas.astype("float32") / 255.0
 
-    # --------------------------------------------------------------------- #
-    #  Model architecture                                                   #
-    # --------------------------------------------------------------------- #
     def _build_cnn_model(self) -> keras.Model:
         inp = keras.Input(shape=MODEL_INPUT_SHAPE)
 
@@ -306,7 +279,6 @@ class DigitClassifier:
         )
         x = aug(inp)
 
-        # block 1
         for _ in range(2):
             x = layers.Conv2D(32, (3, 3), padding="same")(x)
             x = layers.BatchNormalization()(x)
@@ -314,7 +286,6 @@ class DigitClassifier:
         x = layers.MaxPooling2D((2, 2))(x)
         x = layers.Dropout(0.25)(x)
 
-        # block 2
         for _ in range(2):
             x = layers.Conv2D(64, (3, 3), padding="same")(x)
             x = layers.BatchNormalization()(x)
@@ -338,9 +309,6 @@ class DigitClassifier:
         )
         return model
 
-    # --------------------------------------------------------------------- #
-    #  Training                                                             #
-    # --------------------------------------------------------------------- #
     def train(
         self,
         epochs: int = EPOCHS,
@@ -410,7 +378,6 @@ class DigitClassifier:
             verbose=1,
         )
 
-        # final evaluation
         print("\nFinal evaluation:")
         loss, acc = self.model.evaluate(
             sudoku_data_generator(
@@ -428,9 +395,6 @@ class DigitClassifier:
         del train_gen, val_gen
         gc.collect()
 
-    # --------------------------------------------------------------------- #
-    #  Inference                                                            #
-    # --------------------------------------------------------------------- #
     @torch.no_grad()
     def recognise(
         self,
@@ -462,9 +426,6 @@ class DigitClassifier:
         return idx, conf
 
 
-# --------------------------------------------------------------------------- #
-#  CLI / quick test                                                           #
-# --------------------------------------------------------------------------- #
 if __name__ == "__main__":
     FORCE_TRAIN = False
     if FORCE_TRAIN and Path(MODEL_FILENAME).exists():

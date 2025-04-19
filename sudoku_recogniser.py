@@ -1,6 +1,6 @@
 # sudoku_recogniser.py
 """
-Command‑line utility: detect a Sudoku grid in an image and recognise its digits.
+Command-line utility: detect a Sudoku grid in an image and recognise its digits.
 """
 from __future__ import annotations
 
@@ -22,9 +22,6 @@ from digit_extractor import GRID_SIZE, extract_cells_from_image
 FINAL_CONFIDENCE_THRESHOLD = 0.80
 
 
-# --------------------------------------------------------------------------- #
-#  Pretty printing                                                            #
-# --------------------------------------------------------------------------- #
 def print_sudoku_grid(
     grid: np.ndarray,
     conf: np.ndarray | None = None,
@@ -57,9 +54,6 @@ def print_sudoku_grid(
     print()
 
 
-# --------------------------------------------------------------------------- #
-#  Overlay helper                                                             #
-# --------------------------------------------------------------------------- #
 def display_results_on_image(
     rectified: np.ndarray, grid: np.ndarray
 ) -> np.ndarray | None:
@@ -97,9 +91,6 @@ def display_results_on_image(
     return img
 
 
-# --------------------------------------------------------------------------- #
-#  Recognition pipeline                                                       #
-# --------------------------------------------------------------------------- #
 def recognise_sudoku(
     img_path: Path,
     classifier: DigitClassifier,
@@ -125,9 +116,6 @@ def recognise_sudoku(
     return pred, conf, rectified
 
 
-# --------------------------------------------------------------------------- #
-#  Entry‑point                                                                #
-# --------------------------------------------------------------------------- #
 def main() -> None:
     if len(sys.argv) < 2:
         print("Usage: sudoku_recogniser.py <image>")
