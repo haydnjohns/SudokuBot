@@ -185,7 +185,7 @@ class DigitClassifier:
 
         # 6) model prediction
         sample = canvas.astype("float32")[None, ..., None] / 255.0
-        prob = self.model(sample)[0].numpy()
+        prob = self.model(sample)[0].cpu().detach().numpy()
         digit_pred = int(prob.argmax())
         confidence = float(prob[digit_pred])
 
