@@ -515,6 +515,30 @@ class DigitClassifier:
             MODEL_INPUT_SHAPE,
         )
 
+        # Dump a few training samples to disk for inspection
+        try:
+            sample_dir = Path("training_samples")
+            sample_dir.mkdir(parents=True, exist_ok=True)
+            x_sample, y_sample = next(train_gen)
+            n_dump = min(16, x_sample.shape[0])
+            for i in range(n_dump):
+                # convert normalized float back to uint8 image
+                img = (x_sample[i, ..., 0] * 255).astype("uint8")
+                label = int(y_sample[i])
+                label_str = "empty" if label == EMPTY_LABEL else str(label)
+                fname = sample_dir / f"train_{i:03d}_label_{label_str}.png"
+                cv2.imwrite(str(fname), img)
+            print(f"[Training] Dumped {n_dump} training samples to '{sample_dir}'")
+        except Exception as e:
+            print(f"[Training] Failed to dump training samples: {e}")
+        # Reset generator so training starts from a fresh batch
+        train_gen = sudoku_data_generator(
+            SudokuRenderer(),
+            batch_size,
+            train_preproc,
+            MODEL_INPUT_SHAPE,
+        )
+
         # Callbacks
         cbs: list[callbacks.Callback] = [
             callbacks.EarlyStopping(

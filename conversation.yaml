@@ -438,6 +438,40 @@ local_system:
             >         proc = np.clip(proc * alpha + beta, 0.0, 1.0).astype("float32")
             >         return proc
             >
+            >     def _augment_cell_hard(self, proc: np.ndarray) -> np.ndarray:
+            >         """Apply stronger distortions for challenging examples."""
+            >         h, w = proc.shape
+            >         # 1) stronger random rotation
+            >         angle = random.uniform(-30, 30)
+            >         M_rot = cv2.getRotationMatrix2D((w/2, h/2), angle, 1.0)
+            >         proc = cv2.warpAffine(proc, M_rot, (w, h),
+            >                               borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            >         # 2) stronger random translation
+            >         tx, ty = random.uniform(-5, 5), random.uniform(-5, 5)
+            >         M_trans = np.float32([[1, 0, tx], [0, 1, ty]])
+            >         proc = cv2.warpAffine(proc, M_trans, (w, h),
+            >                               borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            >         # 3) morphological distortions (erode/dilate)
+            >         if random.random() < 0.5:
+            >             k = random.randint(1, 3)
+            >             kernel = np.ones((k, k), np.uint8)
+            >             if random.random() < 0.5:
+            >                 proc = cv2.erode(proc, kernel)
+            >             else:
+            >                 proc = cv2.dilate(proc, kernel)
+            >         # 4) perspective jitter
+            >         jitter = min(h, w) * 0.1
+            >         src_pts = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
+            >         dst_pts = src_pts + np.random.uniform(-jitter, jitter, src_pts.shape).astype(np.float32)
+            >         M_pers = cv2.getPerspectiveTransform(src_pts, dst_pts)
+            >         proc = cv2.warpPerspective(proc, M_pers, (w, h),
+            >                                    borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            >         # 5) photometric jitter
+            >         alpha = random.uniform(0.8, 1.2)
+            >         beta  = random.uniform(-0.2, 0.2)
+            >         proc = np.clip(proc * alpha + beta, 0.0, 1.0).astype("float32")
+            >         return proc
+            >
             >     # -------------------------------------------------------------- #
             >     # training
             >     # -------------------------------------------------------------- #
@@ -471,7 +505,11 @@ local_system:
             >             proc = self._preprocess_cell_for_model(cell)
             >             if proc is None:
             >                 return None
-            >             return self._augment_cell(proc)
+            >             # Mix easy and hard augmentations to oversample challenging cases
+            >             if random.random() < 0.5:
+            >                 return self._augment_cell(proc)
+            >             else:
+            >                 return self._augment_cell_hard(proc)
             >
             >         # Use a fresh renderer instance for each generator if state matters
             >         train_gen = sudoku_data_generator(
@@ -1705,6 +1743,40 @@ local_system:
             >         proc = np.clip(proc * alpha + beta, 0.0, 1.0).astype("float32")
             >         return proc
             >
+            >     def _augment_cell_hard(self, proc: np.ndarray) -> np.ndarray:
+            >         """Apply stronger distortions for challenging examples."""
+            >         h, w = proc.shape
+            >         # 1) stronger random rotation
+            >         angle = random.uniform(-30, 30)
+            >         M_rot = cv2.getRotationMatrix2D((w/2, h/2), angle, 1.0)
+            >         proc = cv2.warpAffine(proc, M_rot, (w, h),
+            >                               borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            >         # 2) stronger random translation
+            >         tx, ty = random.uniform(-5, 5), random.uniform(-5, 5)
+            >         M_trans = np.float32([[1, 0, tx], [0, 1, ty]])
+            >         proc = cv2.warpAffine(proc, M_trans, (w, h),
+            >                               borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            >         # 3) morphological distortions (erode/dilate)
+            >         if random.random() < 0.5:
+            >             k = random.randint(1, 3)
+            >             kernel = np.ones((k, k), np.uint8)
+            >             if random.random() < 0.5:
+            >                 proc = cv2.erode(proc, kernel)
+            >             else:
+            >                 proc = cv2.dilate(proc, kernel)
+            >         # 4) perspective jitter
+            >         jitter = min(h, w) * 0.1
+            >         src_pts = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
+            >         dst_pts = src_pts + np.random.uniform(-jitter, jitter, src_pts.shape).astype(np.float32)
+            >         M_pers = cv2.getPerspectiveTransform(src_pts, dst_pts)
+            >         proc = cv2.warpPerspective(proc, M_pers, (w, h),
+            >                                    borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            >         # 5) photometric jitter
+            >         alpha = random.uniform(0.8, 1.2)
+            >         beta  = random.uniform(-0.2, 0.2)
+            >         proc = np.clip(proc * alpha + beta, 0.0, 1.0).astype("float32")
+            >         return proc
+            >
             >     # -------------------------------------------------------------- #
             >     # training
             >     # -------------------------------------------------------------- #
@@ -1738,7 +1810,11 @@ local_system:
             >             proc = self._preprocess_cell_for_model(cell)
             >             if proc is None:
             >                 return None
-            >             return self._augment_cell(proc)
+            >             # Mix easy and hard augmentations to oversample challenging cases
+            >             if random.random() < 0.5:
+            >                 return self._augment_cell(proc)
+            >             else:
+            >                 return self._augment_cell_hard(proc)
             >
             >         # Use a fresh renderer instance for each generator if state matters
             >         train_gen = sudoku_data_generator(
@@ -2995,6 +3071,40 @@ messages:
             >         proc = np.clip(proc * alpha + beta, 0.0, 1.0).astype("float32")
             >         return proc
             >
+            >     def _augment_cell_hard(self, proc: np.ndarray) -> np.ndarray:
+            >         """Apply stronger distortions for challenging examples."""
+            >         h, w = proc.shape
+            >         # 1) stronger random rotation
+            >         angle = random.uniform(-30, 30)
+            >         M_rot = cv2.getRotationMatrix2D((w/2, h/2), angle, 1.0)
+            >         proc = cv2.warpAffine(proc, M_rot, (w, h),
+            >                               borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            >         # 2) stronger random translation
+            >         tx, ty = random.uniform(-5, 5), random.uniform(-5, 5)
+            >         M_trans = np.float32([[1, 0, tx], [0, 1, ty]])
+            >         proc = cv2.warpAffine(proc, M_trans, (w, h),
+            >                               borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            >         # 3) morphological distortions (erode/dilate)
+            >         if random.random() < 0.5:
+            >             k = random.randint(1, 3)
+            >             kernel = np.ones((k, k), np.uint8)
+            >             if random.random() < 0.5:
+            >                 proc = cv2.erode(proc, kernel)
+            >             else:
+            >                 proc = cv2.dilate(proc, kernel)
+            >         # 4) perspective jitter
+            >         jitter = min(h, w) * 0.1
+            >         src_pts = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
+            >         dst_pts = src_pts + np.random.uniform(-jitter, jitter, src_pts.shape).astype(np.float32)
+            >         M_pers = cv2.getPerspectiveTransform(src_pts, dst_pts)
+            >         proc = cv2.warpPerspective(proc, M_pers, (w, h),
+            >                                    borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            >         # 5) photometric jitter
+            >         alpha = random.uniform(0.8, 1.2)
+            >         beta  = random.uniform(-0.2, 0.2)
+            >         proc = np.clip(proc * alpha + beta, 0.0, 1.0).astype("float32")
+            >         return proc
+            >
             >     # -------------------------------------------------------------- #
             >     # training
             >     # -------------------------------------------------------------- #
@@ -3028,7 +3138,11 @@ messages:
             >             proc = self._preprocess_cell_for_model(cell)
             >             if proc is None:
             >                 return None
-            >             return self._augment_cell(proc)
+            >             # Mix easy and hard augmentations to oversample challenging cases
+            >             if random.random() < 0.5:
+            >                 return self._augment_cell(proc)
+            >             else:
+            >                 return self._augment_cell_hard(proc)
             >
             >         # Use a fresh renderer instance for each generator if state matters
             >         train_gen = sudoku_data_generator(
@@ -3849,74 +3963,67 @@ messages:
         metadata:
             filename: sudoku_renderer.py
     -
-        user:
-            > This model reaches about 94% accuracy. We need much high accuracy. Improve it. Perhaps on the data side?
-            > Some samples are just much trickier. It might be good if we can increase the concentration of those in our dataset. But how?
+        user: It's hard to see here what the model is actually training on. Make it so some examples are dumped to a file.
         metadata:
     -
         assistant:
             > ```diff
             > diff --git a/digit_classifier.py b/digit_classifier.py
-            > index 1234567..89abcde 100644
+            > index abcdef1..1234567 100644
             > --- a/digit_classifier.py
             > +++ b/digit_classifier.py
-            > @@ class DigitClassifier:
-            >      def _augment_cell(self, proc: np.ndarray) -> np.ndarray:
-            >          """Apply random small rotations, translations and brightness/contrast jitter."""
-            > @@     def _augment_cell(self, proc: np.ndarray) -> np.ndarray:
-            >          proc = np.clip(proc * alpha + beta, 0.0, 1.0).astype("float32")
-            >          return proc
-            > +
-            > +    def _augment_cell_hard(self, proc: np.ndarray) -> np.ndarray:
-            > +        """Apply stronger distortions for challenging examples."""
-            > +        h, w = proc.shape
-            > +        # 1) stronger random rotation
-            > +        angle = random.uniform(-30, 30)
-            > +        M_rot = cv2.getRotationMatrix2D((w/2, h/2), angle, 1.0)
-            > +        proc = cv2.warpAffine(proc, M_rot, (w, h),
-            > +                              borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-            > +        # 2) stronger random translation
-            > +        tx, ty = random.uniform(-5, 5), random.uniform(-5, 5)
-            > +        M_trans = np.float32([[1, 0, tx], [0, 1, ty]])
-            > +        proc = cv2.warpAffine(proc, M_trans, (w, h),
-            > +                              borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-            > +        # 3) morphological distortions (erode/dilate)
-            > +        if random.random() < 0.5:
-            > +            k = random.randint(1, 3)
-            > +            kernel = np.ones((k, k), np.uint8)
-            > +            if random.random() < 0.5:
-            > +                proc = cv2.erode(proc, kernel)
-            > +            else:
-            > +                proc = cv2.dilate(proc, kernel)
-            > +        # 4) perspective jitter
-            > +        jitter = min(h, w) * 0.1
-            > +        src_pts = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
-            > +        dst_pts = src_pts + np.random.uniform(-jitter, jitter, src_pts.shape).astype(np.float32)
-            > +        M_pers = cv2.getPerspectiveTransform(src_pts, dst_pts)
-            > +        proc = cv2.warpPerspective(proc, M_pers, (w, h),
-            > +                                   borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-            > +        # 5) photometric jitter
-            > +        alpha = random.uniform(0.8, 1.2)
-            > +        beta  = random.uniform(-0.2, 0.2)
-            > +        proc = np.clip(proc * alpha + beta, 0.0, 1.0).astype("float32")
-            > +        return proc
             > @@ def train(
-            > -        def train_preproc(cell):
-            > -            proc = self._preprocess_cell_for_model(cell)
-            > -            if proc is None:
-            > -                return None
-            > -            return self._augment_cell(proc)
-            > +        def train_preproc(cell):
-            > +            proc = self._preprocess_cell_for_model(cell)
-            > +            if proc is None:
-            > +                return None
-            > +            # Mix easy and hard augmentations to oversample challenging cases
-            > +            if random.random() < 0.5:
-            > +                return self._augment_cell(proc)
-            > +            else:
-            > +                return self._augment_cell_hard(proc)
+            > -        train_gen = sudoku_data_generator(
+            > -            SudokuRenderer(),
+            > -            batch_size,
+            > -            train_preproc,
+            > -            MODEL_INPUT_SHAPE,
+            > -        )
+            > +        train_gen = sudoku_data_generator(
+            > +            SudokuRenderer(),
+            > +            batch_size,
+            > +            train_preproc,
+            > +            MODEL_INPUT_SHAPE,
+            > +        )
+            > @@ def train(
+            > -        val_gen = sudoku_data_generator(
+            > -            SudokuRenderer(),
+            > -            batch_size,
+            > -            self._preprocess_cell_for_model,
+            > -            MODEL_INPUT_SHAPE,
+            > -        )
+            > +        val_gen = sudoku_data_generator(
+            > +            SudokuRenderer(),
+            > +            batch_size,
+            > +            self._preprocess_cell_for_model,
+            > +            MODEL_INPUT_SHAPE,
+            > +        )
+            > +
+            > +        # Dump a few training samples to disk for inspection
+            > +        try:
+            > +            sample_dir = Path("training_samples")
+            > +            sample_dir.mkdir(parents=True, exist_ok=True)
+            > +            x_sample, y_sample = next(train_gen)
+            > +            n_dump = min(16, x_sample.shape[0])
+            > +            for i in range(n_dump):
+            > +                # convert normalized float back to uint8 image
+            > +                img = (x_sample[i, ..., 0] * 255).astype("uint8")
+            > +                label = int(y_sample[i])
+            > +                label_str = "empty" if label == EMPTY_LABEL else str(label)
+            > +                fname = sample_dir / f"train_{i:03d}_label_{label_str}.png"
+            > +                cv2.imwrite(str(fname), img)
+            > +            print(f"[Training] Dumped {n_dump} training samples to '{sample_dir}'")
+            > +        except Exception as e:
+            > +            print(f"[Training] Failed to dump training samples: {e}")
+            > +        # Reset generator so training starts from a fresh batch
+            > +        train_gen = sudoku_data_generator(
+            > +            SudokuRenderer(),
+            > +            batch_size,
+            > +            train_preproc,
+            > +            MODEL_INPUT_SHAPE,
+            > +        )
             > ```
-            > This adds a “hard” augmentation path—stronger rotations, translations, morphological operations and perspective jitter—so that roughly half your training samples are more challenging, boosting your network’s robustness on tricky inputs.
+            > This patch creates a `training_samples` directory and writes the first 16 (or fewer) images from the training generator as PNGs named with their labels, letting you inspect exactly what the network sees.
         metadata:
     -
         user:
