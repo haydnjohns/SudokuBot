@@ -145,7 +145,7 @@ def sudoku_data_generator(
 # 6.  helper for normalization
 # ------------------------------------------------------------------ #
 def _norm():
-    return layers.BatchNormalization()
+    return layers.GroupNormalization()
 
 
 # ------------------------------------------------------------------ #
