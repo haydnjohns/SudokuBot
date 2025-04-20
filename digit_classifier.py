@@ -189,14 +189,14 @@ class DigitClassifier:
         x = x_in
         for i, f in enumerate(cfg):
             x = layers.Conv2D(f, 3, padding="same", use_bias=False)(x)
-            x = layers.ELU()(x)
+            x = layers.Activation("gelu")(x)
             x = _norm()(x)
             if i in pool_at:
                 x = layers.MaxPooling2D(2)(x)
 
         # 1×1 bottleneck
         x = layers.Conv2D(256, 1, use_bias=False)(x)
-        x = layers.ELU()(x)
+        x = layers.Activation("gelu")(x)
         x = _norm()(x)
 
         # classifier head
