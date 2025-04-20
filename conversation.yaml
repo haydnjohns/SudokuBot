@@ -416,6 +416,28 @@ local_system:
             >         # Normalize to [0, 1] float32
             >         return canvas.astype("float32") / 255.0
             >
+            >     # ------------------------------------------------------------------ #
+            >     # 7.1  augmentation for training
+            >     # ------------------------------------------------------------------ #
+            >     def _augment_cell(self, proc: np.ndarray) -> np.ndarray:
+            >         """Apply random small rotations, translations and brightness/contrast jitter."""
+            >         h, w = proc.shape
+            >         # 1) random rotation
+            >         angle = random.uniform(-15, 15)
+            >         M_rot = cv2.getRotationMatrix2D((w/2, h/2), angle, 1.0)
+            >         proc = cv2.warpAffine(proc, M_rot, (w, h),
+            >                               borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            >         # 2) random translation
+            >         tx, ty = random.uniform(-2, 2), random.uniform(-2, 2)
+            >         M_trans = np.float32([[1, 0, tx], [0, 1, ty]])
+            >         proc = cv2.warpAffine(proc, M_trans, (w, h),
+            >                               borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            >         # 3) photometric jitter (contrast & brightness)
+            >         alpha = random.uniform(0.8, 1.2)
+            >         beta  = random.uniform(-0.1, 0.1)
+            >         proc = np.clip(proc * alpha + beta, 0.0, 1.0).astype("float32")
+            >         return proc
+            >
             >     # -------------------------------------------------------------- #
             >     # training
             >     # -------------------------------------------------------------- #
@@ -444,11 +466,18 @@ local_system:
             >             print(f"[Warning] Epoch-callback disabled during setup ({e})")
             >             epoch_cb = None
             >
+            >         # Wrap preprocessing with augmentation for training
+            >         def train_preproc(cell):
+            >             proc = self._preprocess_cell_for_model(cell)
+            >             if proc is None:
+            >                 return None
+            >             return self._augment_cell(proc)
+            >
             >         # Use a fresh renderer instance for each generator if state matters
             >         train_gen = sudoku_data_generator(
             >             SudokuRenderer(),
             >             batch_size,
-            >             self._preprocess_cell_for_model,
+            >             train_preproc,
             >             MODEL_INPUT_SHAPE,
             >         )
             >         val_gen = sudoku_data_generator(
@@ -1654,6 +1683,28 @@ local_system:
             >         # Normalize to [0, 1] float32
             >         return canvas.astype("float32") / 255.0
             >
+            >     # ------------------------------------------------------------------ #
+            >     # 7.1  augmentation for training
+            >     # ------------------------------------------------------------------ #
+            >     def _augment_cell(self, proc: np.ndarray) -> np.ndarray:
+            >         """Apply random small rotations, translations and brightness/contrast jitter."""
+            >         h, w = proc.shape
+            >         # 1) random rotation
+            >         angle = random.uniform(-15, 15)
+            >         M_rot = cv2.getRotationMatrix2D((w/2, h/2), angle, 1.0)
+            >         proc = cv2.warpAffine(proc, M_rot, (w, h),
+            >                               borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            >         # 2) random translation
+            >         tx, ty = random.uniform(-2, 2), random.uniform(-2, 2)
+            >         M_trans = np.float32([[1, 0, tx], [0, 1, ty]])
+            >         proc = cv2.warpAffine(proc, M_trans, (w, h),
+            >                               borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            >         # 3) photometric jitter (contrast & brightness)
+            >         alpha = random.uniform(0.8, 1.2)
+            >         beta  = random.uniform(-0.1, 0.1)
+            >         proc = np.clip(proc * alpha + beta, 0.0, 1.0).astype("float32")
+            >         return proc
+            >
             >     # -------------------------------------------------------------- #
             >     # training
             >     # -------------------------------------------------------------- #
@@ -1682,11 +1733,18 @@ local_system:
             >             print(f"[Warning] Epoch-callback disabled during setup ({e})")
             >             epoch_cb = None
             >
+            >         # Wrap preprocessing with augmentation for training
+            >         def train_preproc(cell):
+            >             proc = self._preprocess_cell_for_model(cell)
+            >             if proc is None:
+            >                 return None
+            >             return self._augment_cell(proc)
+            >
             >         # Use a fresh renderer instance for each generator if state matters
             >         train_gen = sudoku_data_generator(
             >             SudokuRenderer(),
             >             batch_size,
-            >             self._preprocess_cell_for_model,
+            >             train_preproc,
             >             MODEL_INPUT_SHAPE,
             >         )
             >         val_gen = sudoku_data_generator(
@@ -2915,6 +2973,28 @@ messages:
             >         # Normalize to [0, 1] float32
             >         return canvas.astype("float32") / 255.0
             >
+            >     # ------------------------------------------------------------------ #
+            >     # 7.1  augmentation for training
+            >     # ------------------------------------------------------------------ #
+            >     def _augment_cell(self, proc: np.ndarray) -> np.ndarray:
+            >         """Apply random small rotations, translations and brightness/contrast jitter."""
+            >         h, w = proc.shape
+            >         # 1) random rotation
+            >         angle = random.uniform(-15, 15)
+            >         M_rot = cv2.getRotationMatrix2D((w/2, h/2), angle, 1.0)
+            >         proc = cv2.warpAffine(proc, M_rot, (w, h),
+            >                               borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            >         # 2) random translation
+            >         tx, ty = random.uniform(-2, 2), random.uniform(-2, 2)
+            >         M_trans = np.float32([[1, 0, tx], [0, 1, ty]])
+            >         proc = cv2.warpAffine(proc, M_trans, (w, h),
+            >                               borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            >         # 3) photometric jitter (contrast & brightness)
+            >         alpha = random.uniform(0.8, 1.2)
+            >         beta  = random.uniform(-0.1, 0.1)
+            >         proc = np.clip(proc * alpha + beta, 0.0, 1.0).astype("float32")
+            >         return proc
+            >
             >     # -------------------------------------------------------------- #
             >     # training
             >     # -------------------------------------------------------------- #
@@ -2943,11 +3023,18 @@ messages:
             >             print(f"[Warning] Epoch-callback disabled during setup ({e})")
             >             epoch_cb = None
             >
+            >         # Wrap preprocessing with augmentation for training
+            >         def train_preproc(cell):
+            >             proc = self._preprocess_cell_for_model(cell)
+            >             if proc is None:
+            >                 return None
+            >             return self._augment_cell(proc)
+            >
             >         # Use a fresh renderer instance for each generator if state matters
             >         train_gen = sudoku_data_generator(
             >             SudokuRenderer(),
             >             batch_size,
-            >             self._preprocess_cell_for_model,
+            >             train_preproc,
             >             MODEL_INPUT_SHAPE,
             >         )
             >         val_gen = sudoku_data_generator(
@@ -3762,63 +3849,74 @@ messages:
         metadata:
             filename: sudoku_renderer.py
     -
-        user: This model reaches about 94% accuracy. We need much high accuracy. Improve it. Perhaps on the data side?
+        user:
+            > This model reaches about 94% accuracy. We need much high accuracy. Improve it. Perhaps on the data side?
+            > Some samples are just much trickier. It might be good if we can increase the concentration of those in our dataset. But how?
         metadata:
     -
         assistant:
             > ```diff
             > diff --git a/digit_classifier.py b/digit_classifier.py
-            > index abcdef0..1234567 100644
+            > index 1234567..89abcde 100644
             > --- a/digit_classifier.py
             > +++ b/digit_classifier.py
-            > @@ def _preprocess_cell_for_model(self, cell: np.ndarray) -> Optional[np.ndarray]:
-            >          # Normalize to [0, 1] float32
-            >          return canvas.astype("float32") / 255.0
+            > @@ class DigitClassifier:
+            >      def _augment_cell(self, proc: np.ndarray) -> np.ndarray:
+            >          """Apply random small rotations, translations and brightness/contrast jitter."""
+            > @@     def _augment_cell(self, proc: np.ndarray) -> np.ndarray:
+            >          proc = np.clip(proc * alpha + beta, 0.0, 1.0).astype("float32")
+            >          return proc
             > +
-            > +    # ------------------------------------------------------------------ #
-            > +    # 7.1  augmentation for training
-            > +    # ------------------------------------------------------------------ #
-            > +    def _augment_cell(self, proc: np.ndarray) -> np.ndarray:
-            > +        """Apply random small rotations, translations and brightness/contrast jitter."""
+            > +    def _augment_cell_hard(self, proc: np.ndarray) -> np.ndarray:
+            > +        """Apply stronger distortions for challenging examples."""
             > +        h, w = proc.shape
-            > +        # 1) random rotation
-            > +        angle = random.uniform(-15, 15)
+            > +        # 1) stronger random rotation
+            > +        angle = random.uniform(-30, 30)
             > +        M_rot = cv2.getRotationMatrix2D((w/2, h/2), angle, 1.0)
             > +        proc = cv2.warpAffine(proc, M_rot, (w, h),
             > +                              borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-            > +        # 2) random translation
-            > +        tx, ty = random.uniform(-2, 2), random.uniform(-2, 2)
+            > +        # 2) stronger random translation
+            > +        tx, ty = random.uniform(-5, 5), random.uniform(-5, 5)
             > +        M_trans = np.float32([[1, 0, tx], [0, 1, ty]])
             > +        proc = cv2.warpAffine(proc, M_trans, (w, h),
             > +                              borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-            > +        # 3) photometric jitter (contrast & brightness)
+            > +        # 3) morphological distortions (erode/dilate)
+            > +        if random.random() < 0.5:
+            > +            k = random.randint(1, 3)
+            > +            kernel = np.ones((k, k), np.uint8)
+            > +            if random.random() < 0.5:
+            > +                proc = cv2.erode(proc, kernel)
+            > +            else:
+            > +                proc = cv2.dilate(proc, kernel)
+            > +        # 4) perspective jitter
+            > +        jitter = min(h, w) * 0.1
+            > +        src_pts = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
+            > +        dst_pts = src_pts + np.random.uniform(-jitter, jitter, src_pts.shape).astype(np.float32)
+            > +        M_pers = cv2.getPerspectiveTransform(src_pts, dst_pts)
+            > +        proc = cv2.warpPerspective(proc, M_pers, (w, h),
+            > +                                   borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            > +        # 5) photometric jitter
             > +        alpha = random.uniform(0.8, 1.2)
-            > +        beta  = random.uniform(-0.1, 0.1)
+            > +        beta  = random.uniform(-0.2, 0.2)
             > +        proc = np.clip(proc * alpha + beta, 0.0, 1.0).astype("float32")
             > +        return proc
             > @@ def train(
-            > -        # Use a fresh renderer instance for each generator if state matters
-            > -        train_gen = sudoku_data_generator(
-            > -            SudokuRenderer(),
-            > -            batch_size,
-            > -            self._preprocess_cell_for_model,
-            > -            MODEL_INPUT_SHAPE,
-            > -        )
-            > +        # Wrap preprocessing with augmentation for training
+            > -        def train_preproc(cell):
+            > -            proc = self._preprocess_cell_for_model(cell)
+            > -            if proc is None:
+            > -                return None
+            > -            return self._augment_cell(proc)
             > +        def train_preproc(cell):
             > +            proc = self._preprocess_cell_for_model(cell)
             > +            if proc is None:
             > +                return None
-            > +            return self._augment_cell(proc)
-            > +
-            > +        # Use a fresh renderer instance for each generator if state matters
-            > +        train_gen = sudoku_data_generator(
-            > +            SudokuRenderer(),
-            > +            batch_size,
-            > +            train_preproc,
-            > +            MODEL_INPUT_SHAPE,
-            > +        )
+            > +            # Mix easy and hard augmentations to oversample challenging cases
+            > +            if random.random() < 0.5:
+            > +                return self._augment_cell(proc)
+            > +            else:
+            > +                return self._augment_cell_hard(proc)
             > ```
+            > This adds a “hard” augmentation path—stronger rotations, translations, morphological operations and perspective jitter—so that roughly half your training samples are more challenging, boosting your network’s robustness on tricky inputs.
         metadata:
     -
         user:

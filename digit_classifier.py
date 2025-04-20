@@ -428,6 +428,40 @@ class DigitClassifier:
         proc = np.clip(proc * alpha + beta, 0.0, 1.0).astype("float32")
         return proc
 
+    def _augment_cell_hard(self, proc: np.ndarray) -> np.ndarray:
+        """Apply stronger distortions for challenging examples."""
+        h, w = proc.shape
+        # 1) stronger random rotation
+        angle = random.uniform(-30, 30)
+        M_rot = cv2.getRotationMatrix2D((w/2, h/2), angle, 1.0)
+        proc = cv2.warpAffine(proc, M_rot, (w, h),
+                              borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        # 2) stronger random translation
+        tx, ty = random.uniform(-5, 5), random.uniform(-5, 5)
+        M_trans = np.float32([[1, 0, tx], [0, 1, ty]])
+        proc = cv2.warpAffine(proc, M_trans, (w, h),
+                              borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        # 3) morphological distortions (erode/dilate)
+        if random.random() < 0.5:
+            k = random.randint(1, 3)
+            kernel = np.ones((k, k), np.uint8)
+            if random.random() < 0.5:
+                proc = cv2.erode(proc, kernel)
+            else:
+                proc = cv2.dilate(proc, kernel)
+        # 4) perspective jitter
+        jitter = min(h, w) * 0.1
+        src_pts = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
+        dst_pts = src_pts + np.random.uniform(-jitter, jitter, src_pts.shape).astype(np.float32)
+        M_pers = cv2.getPerspectiveTransform(src_pts, dst_pts)
+        proc = cv2.warpPerspective(proc, M_pers, (w, h),
+                                   borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        # 5) photometric jitter
+        alpha = random.uniform(0.8, 1.2)
+        beta  = random.uniform(-0.2, 0.2)
+        proc = np.clip(proc * alpha + beta, 0.0, 1.0).astype("float32")
+        return proc
+
     # -------------------------------------------------------------- #
     # training
     # -------------------------------------------------------------- #
@@ -461,7 +495,11 @@ class DigitClassifier:
             proc = self._preprocess_cell_for_model(cell)
             if proc is None:
                 return None
-            return self._augment_cell(proc)
+            # Mix easy and hard augmentations to oversample challenging cases
+            if random.random() < 0.5:
+                return self._augment_cell(proc)
+            else:
+                return self._augment_cell_hard(proc)
 
         # Use a fresh renderer instance for each generator if state matters
         train_gen = sudoku_data_generator(
