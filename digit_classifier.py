@@ -26,7 +26,7 @@ import cv2
 import numpy as np
 import torch
 import keras
-from keras import callbacks, layers, models
+from keras import callbacks, layers, models, activations
 
 # ------------------------------------------------------------------ #
 # 3.  project‑local imports
@@ -184,25 +184,26 @@ class DigitClassifier:
         """Simple CNN."""
         cfg = [32, 32, 64, 64, 96, 96, 96, 128, 128, 128, 128, 192, 192]
         pool_at = {1, 3, 6, 10}
+        activation = lambda x: activations.gelu(x, approximate=True)
 
         x_in = keras.Input(shape=MODEL_INPUT_SHAPE)
         x = x_in
         for i, f in enumerate(cfg):
             x = layers.Conv2D(f, 3, padding="same", use_bias=False)(x)
-            x = layers.Activation("gelu")(x)
+            x = layers.Activation(activation)(x)
             x = _norm()(x)
             if i in pool_at:
                 x = layers.MaxPooling2D(2)(x)
 
         # 1×1 bottleneck
         x = layers.Conv2D(256, 1, use_bias=False)(x)
-        x = layers.Activation("gelu")(x)
+        x = layers.Activation(activation)(x)
         x = _norm()(x)
 
         # classifier head
         x = layers.GlobalAveragePooling2D()(x)
-        x = layers.Dense(128, activation="gelu")(x)
-        x = layers.Dense(64, activation="gelu")(x)
+        x = layers.Dense(128, activation=activation)(x)
+        x = layers.Dense(64, activation=activation)(x)
         y_out = layers.Dense(NUM_CLASSES, activation="softmax")(x)
 
         model = models.Model(x_in, y_out, name="simplenet_digits_ln")
