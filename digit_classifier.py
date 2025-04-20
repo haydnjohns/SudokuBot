@@ -145,7 +145,7 @@ def sudoku_data_generator(
 # 6.  helper for normalization
 # ------------------------------------------------------------------ #
 def _norm():
-    return layers.BatchNormalization(epsilon=1e-5)
+    return layers.BatchNormalization()
 
 
 # ------------------------------------------------------------------ #
@@ -189,15 +189,15 @@ class DigitClassifier:
         x = x_in
         for i, f in enumerate(cfg):
             x = layers.Conv2D(f, 3, padding="same", use_bias=False)(x)
-            x = _norm()(x)
             x = layers.ReLU()(x)
+            x = _norm()(x)
             if i in pool_at:
                 x = layers.MaxPooling2D(2)(x)
 
         # 1×1 bottleneck
         x = layers.Conv2D(256, 1, use_bias=False)(x)
-        x = _norm()(x)
         x = layers.ReLU()(x)
+        x = _norm()(x)
 
         # classifier head
         x = layers.GlobalAveragePooling2D()(x)
