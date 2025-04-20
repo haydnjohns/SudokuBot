@@ -1,24 +1,26 @@
 """
-Convolution-NN based digit classifier for Sudoku recognition.
-Fixed version:
-  – backend is selected *before* importing Keras
-  – Batch Normalisation → Layer Normalisation
-    (gets rid of the big train/val accuracy gap)
+SudokuBot – digit classifier
+Fixed version 2025‑04‑20
+
+Major fixes
+• data generator now really yields balanced batches
+• preprocessing is tolerant – almost never rejects a cell
 """
 
 # ------------------------------------------------------------------ #
-# 1.  Backend must be selected BEFORE importing keras
+# 1.  choose backend BEFORE importing keras
 # ------------------------------------------------------------------ #
 import os
-os.environ["KERAS_BACKEND"] = "torch"          # HAS TO BE FIRST
+
+os.environ["KERAS_BACKEND"] = "torch"  # must be first – do NOT move
 
 # ------------------------------------------------------------------ #
-# 2.  Standard imports
+# 2.  std‑lib & 3rd‑party imports
 # ------------------------------------------------------------------ #
-import random
 import gc
+import random
 from pathlib import Path
-from typing import Callable, Generator, Tuple, Optional
+from typing import Callable, Generator, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -27,22 +29,28 @@ import keras
 from keras import callbacks, layers, models
 
 # ------------------------------------------------------------------ #
-# 3.  Project-local imports
+# 3.  project‑local imports
 # ------------------------------------------------------------------ #
 from sudoku_renderer import SudokuRenderer, generate_and_save_test_example
-from digit_extractor import GRID_SIZE, extract_cells_from_image, rectify_grid, split_into_cells
+from digit_extractor import (
+    GRID_SIZE,
+    extract_cells_from_image,
+    rectify_grid,
+    split_into_cells,
+)
 import sudoku_recogniser
 
-
 # ------------------------------------------------------------------ #
-# 4.  Constants
+# 4.  constants
 # ------------------------------------------------------------------ #
 MODEL_FILENAME = "sudoku_digit_classifier_cnn.keras"
+
 MODEL_INPUT_SHAPE = (28, 28, 1)
-NUM_CLASSES = 11          # digits 0-9  +  “empty”
+NUM_CLASSES = 11  # digits 0‑9 + “empty”
 EMPTY_LABEL = 10
-TARGET_CELL_CONTENT_SIZE = 24
-TARGET_DIGIT_RATIO = 1.5
+
+TARGET_CELL_CONTENT_SIZE = 24          # preprocessing
+TARGET_DIGIT_RATIO = 1.5               # 60 % digits / 40 % empty
 
 EPOCHS = 10
 STEPS_PER_EPOCH = 100
@@ -51,9 +59,8 @@ VALIDATION_STEPS = 50
 
 DataBatch = Tuple[np.ndarray, np.ndarray]
 
-
 # ------------------------------------------------------------------ #
-# 5.  Data generator (unchanged)
+# 5.  balanced data generator (fixed)
 # ------------------------------------------------------------------ #
 def sudoku_data_generator(
     renderer: SudokuRenderer,
@@ -63,83 +70,90 @@ def sudoku_data_generator(
     target_digit_ratio: float = TARGET_DIGIT_RATIO,
 ) -> Generator[DataBatch, None, None]:
     """
-    Yield balanced batches of (cell_image, label) for training / validation.
+    Yield *balanced* batches of (cell, label).
+
+    The function never gives up early – it keeps sampling Sudokus until the
+    required number of digit and empty cells has been collected.
     """
     total_cells = GRID_SIZE * GRID_SIZE
-    target_digits = int(batch_size * target_digit_ratio / (1 + target_digit_ratio))
-    target_empty = batch_size - target_digits
-    input_h, input_w = input_size[:2]
+    want_digits = int(batch_size * target_digit_ratio / (1 + target_digit_ratio))
+    want_empty = batch_size - want_digits
+    in_h, in_w = input_size[:2]
 
+    batch_counter = 0
     while True:
-        x_list, y_list = [], []
-        n_digits = n_empty = 0
-        attempts = 0
-        max_attempts = batch_size * 4
+        xs, ys = [], []
+        n_dig = n_emp = 0
 
-        while len(x_list) < batch_size and attempts < max_attempts:
-            attempts += 1
-            allow_empty = (random.random() < 0.8)
-            img, gt_grid, corners = renderer.render_sudoku(allow_empty=allow_empty)
+        while n_dig < want_digits or n_emp < want_empty:
+            img, gt_grid, corners = renderer.render_sudoku(allow_empty=True)
             if img is None or corners is None:
                 continue
-
             rectified = rectify_grid(img, corners)
             if rectified is None:
                 continue
-
             cells, _ = split_into_cells(rectified)
             if len(cells) != total_cells:
                 continue
 
-            gt_flat = gt_grid.flatten()
+            # iterate shuffled cell indices
             idxs = list(range(total_cells))
             random.shuffle(idxs)
 
             for idx in idxs:
-                cell = cells[idx]
-                label = EMPTY_LABEL if gt_flat[idx] == 0 else gt_flat[idx]
-                is_empty = (label == EMPTY_LABEL)
-
-                if is_empty and n_empty >= target_empty:
-                    continue
-                if not is_empty and n_digits >= target_digits:
-                    continue
-
-                processed = preprocess_func(cell)
-                if processed is None or processed.shape != (input_h, input_w):
-                    continue
-
-                x_list.append(processed)
-                y_list.append(label)
-                if is_empty:
-                    n_empty += 1
-                else:
-                    n_digits += 1
-
-                if len(x_list) >= batch_size:
+                if n_dig >= want_digits and n_emp >= want_empty:
                     break
 
-        if not x_list:
-            continue
+                cell = cells[idx]
+                label = EMPTY_LABEL if gt_grid.flatten()[idx] == 0 else gt_grid.flatten()[idx]
+                proc = preprocess_func(cell)
+                if proc is None:                       # should be rare now
+                    continue
 
-        x_arr = np.asarray(x_list, dtype="float32")[..., np.newaxis]
-        y_arr = np.asarray(y_list, dtype="int64")
-        p = np.random.permutation(len(y_arr))
+                # balance bookkeeping
+                if label == EMPTY_LABEL:
+                    if n_emp >= want_empty:
+                        continue
+                    n_emp += 1
+                else:
+                    if n_dig >= want_digits:
+                        continue
+                    n_dig += 1
+
+                xs.append(proc)
+                ys.append(label)
+
+        # at this point we have a perfectly balanced batch
+        x_arr = np.asarray(xs, dtype="float32")[..., np.newaxis]
+        y_arr = np.asarray(ys, dtype="int64")
+        p = np.random.permutation(batch_size)
+        batch_counter += 1
+
+        # optional histo print for debugging
+        if (
+            os.environ.get("SUDOKU_DEBUG_GENERATOR", "0") == "1"
+            and batch_counter % 500 == 0
+        ):
+            print("label histogram:", np.bincount(y_arr, minlength=NUM_CLASSES))
+
         yield x_arr[p], y_arr[p]
-        del x_list, y_list, x_arr, y_arr
+        del xs, ys, x_arr, y_arr
         gc.collect()
 
 
 # ------------------------------------------------------------------ #
-# 6.  Fixed CNN backbone (LayerNorm instead of BatchNorm)
+# 6.  helper for LayerNorm
 # ------------------------------------------------------------------ #
-def _norm():                   # small helper → keeps the code tidy
+def _norm():
     return layers.LayerNormalization(epsilon=1e-5)
 
 
+# ------------------------------------------------------------------ #
+# 7.  classifier object
+# ------------------------------------------------------------------ #
 class DigitClassifier:
     """
-    Handles loading, training and inference of the digit-classification model.
+    Handles loading, training and inference of the CNN digit classifier.
     """
 
     # -------------------------------------------------------------- #
@@ -159,29 +173,25 @@ class DigitClassifier:
                 self.model = keras.models.load_model(self.model_path)
                 if self.model.input_shape[1:3] != self._model_input_size:
                     print("[Warning] stored model input size differs from expected")
-                print("Model loaded from disk.")
+                print("Digit‑classifier model loaded from disk.")
             except Exception as e:
-                print(f"[Error] Failed to load model – will re-train ({e})")
+                print(f"[Error] failed to load model – will train from scratch ({e})")
 
     # -------------------------------------------------------------- #
     # backbone
     # -------------------------------------------------------------- #
     def _build_cnn_model(self) -> keras.Model:
-        """Simple-Net backbone (LayerNorm)."""
-        cfg_filters   = [32, 32,        # block-1
-                         64, 64,        # block-2
-                         96, 96, 96,    # block-3
-                         128,128,128,128,  # block-4
-                         192,192]       # block-5
-        pool_after = {1, 3, 6, 10}
+        """Simple CNN with LayerNorm."""
+        cfg = [32, 32, 64, 64, 96, 96, 96, 128, 128, 128, 128, 192, 192]
+        pool_at = {1, 3, 6, 10}
 
         x_in = keras.Input(shape=MODEL_INPUT_SHAPE)
         x = x_in
-        for i, f in enumerate(cfg_filters):
+        for i, f in enumerate(cfg):
             x = layers.Conv2D(f, 3, padding="same", use_bias=False)(x)
-            x = _norm()(x)              # LayerNorm – no train/infer mismatch
+            x = _norm()(x)
             x = layers.ReLU()(x)
-            if i in pool_after:
+            if i in pool_at:
                 x = layers.MaxPooling2D(2)(x)
 
         # 1×1 bottleneck
@@ -192,12 +202,12 @@ class DigitClassifier:
         # classifier head
         x = layers.GlobalAveragePooling2D()(x)
         x = layers.Dense(128, activation="relu")(x)
-        x = layers.Dense(64,  activation="relu")(x)
+        x = layers.Dense(64, activation="relu")(x)
         y_out = layers.Dense(NUM_CLASSES, activation="softmax")(x)
 
-        model = keras.Model(x_in, y_out, name="simplenet_digits_ln")
+        model = models.Model(x_in, y_out, name="simplenet_digits_ln")
         model.compile(
-            optimizer=keras.optimizers.Adam(1e-3),
+            optimizer=keras.optimizers.Adam(3e-4),
             loss="sparse_categorical_crossentropy",
             metrics=["accuracy"],
         )
@@ -205,48 +215,58 @@ class DigitClassifier:
         return model
 
     # -------------------------------------------------------------- #
-    # cell preprocessing (unchanged)
+    # preprocessing (fixed – tolerant)
     # -------------------------------------------------------------- #
     def _preprocess_cell_for_model(self, cell: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Convert raw cell → 28×28 float32 in [0,1].
+        Never raises; returns None only if `cell` itself is invalid.
+        """
         if cell is None or cell.size < 10:
             return None
 
-        gray = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY) if cell.ndim == 3 else cell.copy()
-        blk = max(3, min(gray.shape)//4) | 1
+        gray = (
+            cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY).astype("uint8")
+            if cell.ndim == 3
+            else cell.astype("uint8")
+        )
+
+        # adaptive threshold, fall back to simple Otsu if OpenCV complains
         try:
+            blk = max(3, min(gray.shape) // 4) | 1
             thresh = cv2.adaptiveThreshold(
-                gray, 255,
-                cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV,
-                blk, 7
+                gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, blk, 7
             )
         except cv2.error:
-            return None
+            _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
         pts = cv2.findNonZero(thresh)
-        if pts is None:
-            return None
+        if pts is None:  # looks empty – return black canvas
+            return np.zeros(self._model_input_size, dtype="float32")
+
         x, y, w, h = cv2.boundingRect(pts)
         if w == 0 or h == 0:
-            return None
+            return np.zeros(self._model_input_size, dtype="float32")
 
-        roi = thresh[y:y+h, x:x+w]
+        roi = thresh[y : y + h, x : x + w]
+
         scale = min(
-            TARGET_CELL_CONTENT_SIZE / w,
-            TARGET_CELL_CONTENT_SIZE / h
+            TARGET_CELL_CONTENT_SIZE / max(1, w),
+            TARGET_CELL_CONTENT_SIZE / max(1, h),
         )
-        new_w = max(1, int(w*scale))
-        new_h = max(1, int(h*scale))
+        new_w = max(1, int(round(w * scale)))
+        new_h = max(1, int(round(h * scale)))
         resized = cv2.resize(roi, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
         canvas = np.zeros(self._model_input_size, np.uint8)
-        top  = (self._model_input_size[0]-new_h)//2
-        left = (self._model_input_size[1]-new_w)//2
-        canvas[top:top+new_h, left:left+new_w] = resized
+        top = (self._model_input_size[0] - new_h) // 2
+        left = (self._model_input_size[1] - new_w) // 2
+        canvas[top : top + new_h, left : left + new_w] = resized
 
-        return canvas.astype("float32")/255.0
+        return canvas.astype("float32") / 255.0
 
     # -------------------------------------------------------------- #
-    # training routine (unchanged except the model builder)
+    # training
     # -------------------------------------------------------------- #
     def train(
         self,
@@ -260,16 +280,20 @@ class DigitClassifier:
             test_img, test_gt = generate_and_save_test_example()
             epoch_cb = EpochTestCallback(test_img, test_gt, self)
         except Exception as e:
-            print(f"[Warning] epoch-callback disabled ({e})")
+            print(f"[Warning] epoch‑callback disabled ({e})")
             epoch_cb = None
 
         train_gen = sudoku_data_generator(
-            SudokuRenderer(), batch_size,
-            self._preprocess_cell_for_model, MODEL_INPUT_SHAPE
+            SudokuRenderer(),
+            batch_size,
+            self._preprocess_cell_for_model,
+            MODEL_INPUT_SHAPE,
         )
         val_gen = sudoku_data_generator(
-            SudokuRenderer(), batch_size,
-            self._preprocess_cell_for_model, MODEL_INPUT_SHAPE
+            SudokuRenderer(),
+            batch_size,
+            self._preprocess_cell_for_model,
+            MODEL_INPUT_SHAPE,
         )
 
         if self.model is None:
@@ -277,14 +301,24 @@ class DigitClassifier:
 
         cbs: list[callbacks.Callback] = [
             callbacks.EarlyStopping(
-                monitor="val_loss", patience=5,
-                restore_best_weights=True, verbose=1),
+                monitor="val_loss",
+                patience=5,
+                restore_best_weights=True,
+                verbose=1,
+            ),
             callbacks.ModelCheckpoint(
                 filepath=self.model_path,
-                monitor="val_loss", save_best_only=True, verbose=1),
+                monitor="val_loss",
+                save_best_only=True,
+                verbose=1,
+            ),
             callbacks.ReduceLROnPlateau(
-                monitor="val_loss", factor=0.2,
-                patience=3, min_lr=1e-6, verbose=1),
+                monitor="val_loss",
+                factor=0.2,
+                patience=3,
+                min_lr=1e-6,
+                verbose=1,
+            ),
         ]
         if epoch_cb and epoch_cb.preprocessed is not None:
             cbs.append(epoch_cb)
@@ -302,8 +336,10 @@ class DigitClassifier:
         print("\nFinal evaluation:")
         loss, acc = self.model.evaluate(
             sudoku_data_generator(
-                SudokuRenderer(), batch_size,
-                self._preprocess_cell_for_model, MODEL_INPUT_SHAPE
+                SudokuRenderer(),
+                batch_size,
+                self._preprocess_cell_for_model,
+                MODEL_INPUT_SHAPE,
             ),
             steps=validation_steps,
             verbose=1,
@@ -315,7 +351,7 @@ class DigitClassifier:
         gc.collect()
 
     # -------------------------------------------------------------- #
-    # inference (unchanged)
+    # inference
     # -------------------------------------------------------------- #
     @torch.no_grad()
     def recognise(
@@ -343,7 +379,7 @@ class DigitClassifier:
 
 
 # ------------------------------------------------------------------ #
-# 7.  Epoch-end sanity-check callback (unchanged)
+# 8.  epoch‑end callback (unchanged, except imports at top)
 # ------------------------------------------------------------------ #
 class EpochTestCallback(callbacks.Callback):
     def __init__(
@@ -359,7 +395,7 @@ class EpochTestCallback(callbacks.Callback):
         self.classifier = classifier
 
         cells, _, _ = extract_cells_from_image(test_img_path, debug=False)
-        if not cells or len(cells) != GRID_SIZE*GRID_SIZE:
+        if not cells or len(cells) != GRID_SIZE * GRID_SIZE:
             self.preprocessed = None
             print("[Callback] could not prepare test example – disabled")
             return
@@ -373,15 +409,19 @@ class EpochTestCallback(callbacks.Callback):
         self.preprocessed = np.asarray(buf, dtype="float32")[..., np.newaxis]
 
     def on_epoch_end(self, epoch, logs=None):
-        if self.preprocessed is None or (epoch+1) % self.frequency:
+        if self.preprocessed is None or (epoch + 1) % self.frequency:
             return
 
         probs = self.model.predict(self.preprocessed, verbose=0)
         idxs = np.argmax(probs, axis=1)
         confs = np.max(probs, axis=1)
 
-        final = [(i if (i != EMPTY_LABEL and c >= sudoku_recogniser.FINAL_CONFIDENCE_THRESHOLD) else 0)
-                 for i, c in zip(idxs, confs)]
+        final = [
+            i
+            if (i != EMPTY_LABEL and c >= sudoku_recogniser.FINAL_CONFIDENCE_THRESHOLD)
+            else 0
+            for i, c in zip(idxs, confs)
+        ]
         pred_grid = np.asarray(final).reshape(GRID_SIZE, GRID_SIZE)
         conf_grid = confs.reshape(GRID_SIZE, GRID_SIZE)
 
@@ -395,7 +435,7 @@ class EpochTestCallback(callbacks.Callback):
 
 
 # ------------------------------------------------------------------ #
-# 8.  CLI-helper (unchanged)
+# 9.  CLI helper
 # ------------------------------------------------------------------ #
 if __name__ == "__main__":
     FORCE_TRAIN = True
