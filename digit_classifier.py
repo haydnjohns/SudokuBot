@@ -142,10 +142,14 @@ def sudoku_data_generator(
 
 
 # ------------------------------------------------------------------ #
-# 6.  helper for normalization
+# 6.  layer helpers
 # ------------------------------------------------------------------ #
 def _norm():
     return layers.GroupNormalization()
+
+
+def activation(x):
+    return activations.gelu(x, approximate=True)
 
 
 # ------------------------------------------------------------------ #
@@ -184,7 +188,6 @@ class DigitClassifier:
         """Simple CNN."""
         cfg = [32, 32, 64, 64, 96, 96, 96, 128, 128, 128, 128, 192, 192]
         pool_at = {1, 3, 6, 10}
-        activation = lambda x: activations.gelu(x, approximate=True)
 
         x_in = keras.Input(shape=MODEL_INPUT_SHAPE)
         x = x_in
