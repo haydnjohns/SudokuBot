@@ -406,6 +406,28 @@ class DigitClassifier:
         # Normalize to [0, 1] float32
         return canvas.astype("float32") / 255.0
 
+    # ------------------------------------------------------------------ #
+    # 7.1  augmentation for training
+    # ------------------------------------------------------------------ #
+    def _augment_cell(self, proc: np.ndarray) -> np.ndarray:
+        """Apply random small rotations, translations and brightness/contrast jitter."""
+        h, w = proc.shape
+        # 1) random rotation
+        angle = random.uniform(-15, 15)
+        M_rot = cv2.getRotationMatrix2D((w/2, h/2), angle, 1.0)
+        proc = cv2.warpAffine(proc, M_rot, (w, h),
+                              borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        # 2) random translation
+        tx, ty = random.uniform(-2, 2), random.uniform(-2, 2)
+        M_trans = np.float32([[1, 0, tx], [0, 1, ty]])
+        proc = cv2.warpAffine(proc, M_trans, (w, h),
+                              borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        # 3) photometric jitter (contrast & brightness)
+        alpha = random.uniform(0.8, 1.2)
+        beta  = random.uniform(-0.1, 0.1)
+        proc = np.clip(proc * alpha + beta, 0.0, 1.0).astype("float32")
+        return proc
+
     # -------------------------------------------------------------- #
     # training
     # -------------------------------------------------------------- #
@@ -434,11 +456,18 @@ class DigitClassifier:
             print(f"[Warning] Epoch-callback disabled during setup ({e})")
             epoch_cb = None
 
+        # Wrap preprocessing with augmentation for training
+        def train_preproc(cell):
+            proc = self._preprocess_cell_for_model(cell)
+            if proc is None:
+                return None
+            return self._augment_cell(proc)
+
         # Use a fresh renderer instance for each generator if state matters
         train_gen = sudoku_data_generator(
             SudokuRenderer(),
             batch_size,
-            self._preprocess_cell_for_model,
+            train_preproc,
             MODEL_INPUT_SHAPE,
         )
         val_gen = sudoku_data_generator(
