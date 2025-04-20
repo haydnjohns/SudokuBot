@@ -189,20 +189,20 @@ class DigitClassifier:
         x = x_in
         for i, f in enumerate(cfg):
             x = layers.Conv2D(f, 3, padding="same", use_bias=False)(x)
-            x = layers.ReLU()(x)
+            x = layers.ELU()(x)
             x = _norm()(x)
             if i in pool_at:
                 x = layers.MaxPooling2D(2)(x)
 
         # 1×1 bottleneck
         x = layers.Conv2D(256, 1, use_bias=False)(x)
-        x = layers.ReLU()(x)
+        x = layers.ELU()(x)
         x = _norm()(x)
 
         # classifier head
         x = layers.GlobalAveragePooling2D()(x)
-        x = layers.Dense(128, activation="relu")(x)
-        x = layers.Dense(64, activation="relu")(x)
+        x = layers.Dense(128, activation="gelu")(x)
+        x = layers.Dense(64, activation="gelu")(x)
         y_out = layers.Dense(NUM_CLASSES, activation="softmax")(x)
 
         model = models.Model(x_in, y_out, name="simplenet_digits_ln")
