@@ -30,7 +30,7 @@ TARGET_DIGIT_RATIO = 1.5
 
 EPOCHS = 20
 STEPS_PER_EPOCH = 150
-BATCH_SIZE = 512
+BATCH_SIZE = 256
 VALIDATION_STEPS = 50
 
 DataBatch = Tuple[np.ndarray, np.ndarray]
