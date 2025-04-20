@@ -1,5 +1,5 @@
 """
-Convolution‑NN based digit classifier for Sudoku recognition.
+Convolution-NN based digit classifier for Sudoku recognition.
 Fixed version:
   – backend is selected *before* importing Keras
   – Batch Normalisation → Layer Normalisation
@@ -27,7 +27,7 @@ import keras
 from keras import callbacks, layers, models
 
 # ------------------------------------------------------------------ #
-# 3.  Project‑local imports
+# 3.  Project-local imports
 # ------------------------------------------------------------------ #
 from sudoku_renderer import SudokuRenderer, generate_and_save_test_example
 from digit_extractor import GRID_SIZE, extract_cells_from_image, rectify_grid, split_into_cells
@@ -39,7 +39,7 @@ from sudoku_recogniser import FINAL_CONFIDENCE_THRESHOLD, print_sudoku_grid
 # ------------------------------------------------------------------ #
 MODEL_FILENAME = "sudoku_digit_classifier_cnn.keras"
 MODEL_INPUT_SHAPE = (28, 28, 1)
-NUM_CLASSES = 11          # digits 0‑9  +  “empty”
+NUM_CLASSES = 11          # digits 0-9  +  “empty”
 EMPTY_LABEL = 10
 TARGET_CELL_CONTENT_SIZE = 24
 TARGET_DIGIT_RATIO = 1.5
@@ -139,7 +139,7 @@ def _norm():                   # small helper → keeps the code tidy
 
 class DigitClassifier:
     """
-    Handles loading, training and inference of the digit‑classification model.
+    Handles loading, training and inference of the digit-classification model.
     """
 
     # -------------------------------------------------------------- #
@@ -161,18 +161,18 @@ class DigitClassifier:
                     print("[Warning] stored model input size differs from expected")
                 print("Model loaded from disk.")
             except Exception as e:
-                print(f"[Error] Failed to load model – will re‑train ({e})")
+                print(f"[Error] Failed to load model – will re-train ({e})")
 
     # -------------------------------------------------------------- #
     # backbone
     # -------------------------------------------------------------- #
     def _build_cnn_model(self) -> keras.Model:
-        """Simple‑Net backbone (LayerNorm)."""
-        cfg_filters   = [32, 32,        # block‑1
-                         64, 64,        # block‑2
-                         96, 96, 96,    # block‑3
-                         128,128,128,128,  # block‑4
-                         192,192]       # block‑5
+        """Simple-Net backbone (LayerNorm)."""
+        cfg_filters   = [32, 32,        # block-1
+                         64, 64,        # block-2
+                         96, 96, 96,    # block-3
+                         128,128,128,128,  # block-4
+                         192,192]       # block-5
         pool_after = {1, 3, 6, 10}
 
         x_in = keras.Input(shape=MODEL_INPUT_SHAPE)
@@ -260,7 +260,7 @@ class DigitClassifier:
             test_img, test_gt = generate_and_save_test_example()
             epoch_cb = EpochTestCallback(test_img, test_gt, self)
         except Exception as e:
-            print(f"[Warning] epoch‑callback disabled ({e})")
+            print(f"[Warning] epoch-callback disabled ({e})")
             epoch_cb = None
 
         train_gen = sudoku_data_generator(
@@ -284,7 +284,7 @@ class DigitClassifier:
                 monitor="val_loss", save_best_only=True, verbose=1),
             callbacks.ReduceLROnPlateau(
                 monitor="val_loss", factor=0.2,
-                patience=3, min_lr=1e‑6, verbose=1),
+                patience=3, min_lr=1e-6, verbose=1),
         ]
         if epoch_cb and epoch_cb.preprocessed is not None:
             cbs.append(epoch_cb)
@@ -343,7 +343,7 @@ class DigitClassifier:
 
 
 # ------------------------------------------------------------------ #
-# 7.  Epoch‑end sanity‑check callback (unchanged)
+# 7.  Epoch-end sanity-check callback (unchanged)
 # ------------------------------------------------------------------ #
 class EpochTestCallback(callbacks.Callback):
     def __init__(
@@ -395,7 +395,7 @@ class EpochTestCallback(callbacks.Callback):
 
 
 # ------------------------------------------------------------------ #
-# 8.  CLI‑helper (unchanged)
+# 8.  CLI-helper (unchanged)
 # ------------------------------------------------------------------ #
 if __name__ == "__main__":
     FORCE_TRAIN = False
