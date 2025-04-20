@@ -225,12 +225,16 @@ class DigitClassifier:
         x = layers.BatchNormalization()(x)
         x = layers.ReLU()(x)
 
-        # global spatial pooling → soft‑max output
+        # global spatial pooling
         x = layers.GlobalAveragePooling2D()(x)
+        # add two hidden dense layers before the final classification
+        x = layers.Dense(128, activation="relu")(x)
+        x = layers.Dense(64, activation="relu")(x)
+        # final output layer
         outputs = layers.Dense(NUM_CLASSES, activation="softmax")(x)
 
         model = keras.Model(inputs, outputs, name="simplenet_digits")
-        model.compile(
+        model.compile( 
             optimizer=keras.optimizers.Adam(1e-3),
             loss      ="sparse_categorical_crossentropy",
             metrics   =["accuracy"],
