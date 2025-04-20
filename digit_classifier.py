@@ -1,10 +1,11 @@
 """
 SudokuBot – digit classifier
-Fixed version 2025‑04‑20
+Improved version 2025‑04‑21
 
 Major fixes
 • data generator now really yields balanced batches
 • preprocessing is tolerant – almost never rejects a cell
+• **Improved CNN architecture (ResNet-style) for higher accuracy**
 """
 
 # ------------------------------------------------------------------ #
@@ -26,41 +27,57 @@ import cv2
 import numpy as np
 import torch
 import keras
-from keras import callbacks, layers, models, activations
+from keras import callbacks, layers, models, activations, regularizers
 
 # ------------------------------------------------------------------ #
 # 3.  project‑local imports
 # ------------------------------------------------------------------ #
-from sudoku_renderer import SudokuRenderer, generate_and_save_test_example
-from digit_extractor import (
-    GRID_SIZE,
-    extract_cells_from_image,
-    rectify_grid,
-    split_into_cells,
-)
-import sudoku_recogniser
+# Assume these exist in the same directory or are installable
+try:
+    from sudoku_renderer import SudokuRenderer, generate_and_save_test_example
+    from digit_extractor import (
+        GRID_SIZE,
+        extract_cells_from_image,
+        rectify_grid,
+        split_into_cells,
+    )
+    import sudoku_recogniser
+except ImportError as e:
+    print(f"Error importing local modules: {e}")
+    print("Please ensure sudoku_renderer.py, digit_extractor.py, and sudoku_recogniser.py are available.")
+    # Provide dummy implementations or raise error if essential
+    GRID_SIZE = 9
+    class SudokuRenderer:
+        def render_sudoku(self, allow_empty=True): return None, None, None
+    def generate_and_save_test_example(): return Path("dummy_test.png"), np.zeros((9,9), dtype=int)
+    def extract_cells_from_image(path, debug=False): return [], None, None
+    class sudoku_recogniser:
+        FINAL_CONFIDENCE_THRESHOLD = 0.9
+        @staticmethod
+        def print_sudoku_grid(grid, confs=None, threshold=0.0): pass
+
 
 # ------------------------------------------------------------------ #
 # 4.  constants
 # ------------------------------------------------------------------ #
-MODEL_FILENAME = "sudoku_digit_classifier_cnn.keras"
+MODEL_FILENAME = "sudoku_digit_classifier_resnet.keras" # Changed filename
 
 MODEL_INPUT_SHAPE = (28, 28, 1)
 NUM_CLASSES = 11  # digits 0‑9 + “empty”
 EMPTY_LABEL = 10
 
-TARGET_CELL_CONTENT_SIZE = 24          # preprocessing
+TARGET_CELL_CONTENT_SIZE = 26          # preprocessing (Increased slightly)
 TARGET_DIGIT_RATIO = 1.5               # 60 % digits / 40 % empty
 
-EPOCHS = 10
-STEPS_PER_EPOCH = 100
+EPOCHS = 15 # Increased epochs slightly, EarlyStopping will handle it
+STEPS_PER_EPOCH = 150 # Increased steps slightly
 BATCH_SIZE = 256
 VALIDATION_STEPS = 50
 
 DataBatch = Tuple[np.ndarray, np.ndarray]
 
 # ------------------------------------------------------------------ #
-# 5.  balanced data generator (fixed)
+# 5.  balanced data generator (fixed) - unchanged
 # ------------------------------------------------------------------ #
 def sudoku_data_generator(
     renderer: SudokuRenderer,
@@ -76,8 +93,19 @@ def sudoku_data_generator(
     required number of digit and empty cells has been collected.
     """
     total_cells = GRID_SIZE * GRID_SIZE
-    want_digits = int(batch_size * target_digit_ratio / (1 + target_digit_ratio))
+    # Calculate exact numbers needed for balance
+    num_digits_float = batch_size * target_digit_ratio / (1 + target_digit_ratio)
+    want_digits = int(round(num_digits_float))
     want_empty = batch_size - want_digits
+
+    # Ensure the sum is exactly batch_size after rounding
+    if want_digits + want_empty != batch_size:
+         # Adjust the one closer to its float representation's rounding direction
+         if num_digits_float - int(num_digits_float) >= 0.5: # Rounded up
+             want_digits = batch_size - want_empty
+         else: # Rounded down
+             want_empty = batch_size - want_digits
+
     in_h, in_w = input_size[:2]
 
     batch_counter = 0
@@ -85,7 +113,10 @@ def sudoku_data_generator(
         xs, ys = [], []
         n_dig = n_emp = 0
 
-        while n_dig < want_digits or n_emp < want_empty:
+        needed_digits = want_digits
+        needed_empty = want_empty
+
+        while needed_digits > 0 or needed_empty > 0:
             img, gt_grid, corners = renderer.render_sudoku(allow_empty=True)
             if img is None or corners is None:
                 continue
@@ -101,32 +132,46 @@ def sudoku_data_generator(
             random.shuffle(idxs)
 
             for idx in idxs:
-                if n_dig >= want_digits and n_emp >= want_empty:
-                    break
+                if needed_digits <= 0 and needed_empty <= 0:
+                    break # Batch full
 
                 cell = cells[idx]
-                label = EMPTY_LABEL if gt_grid.flatten()[idx] == 0 else gt_grid.flatten()[idx]
+                # Handle potential None from gt_grid (though unlikely with allow_empty=True)
+                gt_val = gt_grid.flat[idx] if gt_grid is not None else 0
+                label = EMPTY_LABEL if gt_val == 0 else gt_val
+
+                # Check if we still need this type of label
+                is_empty = (label == EMPTY_LABEL)
+                if is_empty and needed_empty <= 0:
+                    continue
+                if not is_empty and needed_digits <= 0:
+                    continue
+
                 proc = preprocess_func(cell)
                 if proc is None:                       # should be rare now
                     continue
 
-                # balance bookkeeping
-                if label == EMPTY_LABEL:
-                    if n_emp >= want_empty:
-                        continue
-                    n_emp += 1
-                else:
-                    if n_dig >= want_digits:
-                        continue
-                    n_dig += 1
-
+                # Add to batch and decrement needed count
                 xs.append(proc)
                 ys.append(label)
+                if is_empty:
+                    needed_empty -= 1
+                else:
+                    needed_digits -= 1
+
 
         # at this point we have a perfectly balanced batch
         x_arr = np.asarray(xs, dtype="float32")[..., np.newaxis]
         y_arr = np.asarray(ys, dtype="int64")
-        p = np.random.permutation(batch_size)
+
+        # Sanity check batch size and balance (optional)
+        # assert len(xs) == batch_size, f"Batch size mismatch: expected {batch_size}, got {len(xs)}"
+        # counts = np.bincount(y_arr, minlength=NUM_CLASSES)
+        # assert counts[EMPTY_LABEL] == want_empty, f"Empty count mismatch: expected {want_empty}, got {counts[EMPTY_LABEL]}"
+        # assert np.sum(counts[:EMPTY_LABEL]) == want_digits, f"Digit count mismatch: expected {want_digits}, got {np.sum(counts[:EMPTY_LABEL])}"
+
+
+        p = np.random.permutation(batch_size) # Shuffle within the batch
         batch_counter += 1
 
         # optional histo print for debugging
@@ -134,7 +179,7 @@ def sudoku_data_generator(
             os.environ.get("SUDOKU_DEBUG_GENERATOR", "0") == "1"
             and batch_counter % 500 == 0
         ):
-            print("label histogram:", np.bincount(y_arr, minlength=NUM_CLASSES))
+            print(f"Batch {batch_counter} label histogram:", np.bincount(y_arr, minlength=NUM_CLASSES))
 
         yield x_arr[p], y_arr[p]
         del xs, ys, x_arr, y_arr
@@ -142,15 +187,9 @@ def sudoku_data_generator(
 
 
 # ------------------------------------------------------------------ #
-# 6.  layer helpers
+# 6.  layer helpers (Removed _norm, using BN directly)
 # ------------------------------------------------------------------ #
-def _norm():
-    return layers.GroupNormalization()
-
-
-def activation(x):
-    return activations.gelu(x, approximate=True)
-
+# Using ReLU directly in layers or via layers.Activation('relu')
 
 # ------------------------------------------------------------------ #
 # 7.  classifier object
@@ -158,6 +197,7 @@ def activation(x):
 class DigitClassifier:
     """
     Handles loading, training and inference of the CNN digit classifier.
+    Uses an improved ResNet-style architecture.
     """
 
     # -------------------------------------------------------------- #
@@ -174,44 +214,114 @@ class DigitClassifier:
 
         if not training_required and self.model_path.exists():
             try:
+                # When loading custom objects like custom activation or layers (if any were used),
+                # you might need custom_objects={'CustomLayer': CustomLayer}
                 self.model = keras.models.load_model(self.model_path)
                 if self.model.input_shape[1:3] != self._model_input_size:
-                    print("[Warning] stored model input size differs from expected")
-                print("Digit‑classifier model loaded from disk.")
+                    print(f"[Warning] Stored model input size {self.model.input_shape[1:3]} "
+                          f"differs from expected {self._model_input_size}")
+                print(f"Digit-classifier model loaded from {self.model_path}")
             except Exception as e:
-                print(f"[Error] failed to load model – will train from scratch ({e})")
+                print(f"[Error] Failed to load model from {self.model_path} – will train from scratch ({e})")
+                self.model = None # Ensure model is None if loading failed
+
+        # If training is required, or loading failed, ensure model is None
+        if training_required and self.model is not None:
+             print("Training required, ignoring loaded model.")
+             self.model = None
+        elif training_required and self.model is None:
+             print("Training required, model will be built.")
+        elif not training_required and self.model is None:
+             print("Model not found or failed to load, and training not required. Classifier will not work.")
+
 
     # -------------------------------------------------------------- #
-    # backbone
+    # ResNet-style building block
+    # -------------------------------------------------------------- #
+    def _residual_block(self, x, filters, strides=1, activation="relu"):
+        """Basic residual block."""
+        shortcut = x
+        # Downsample shortcut if needed (stride > 1 or different number of filters)
+        if strides > 1 or shortcut.shape[-1] != filters:
+            shortcut = layers.Conv2D(
+                filters, 1, strides=strides, use_bias=False, kernel_initializer="he_normal"
+            )(shortcut)
+            shortcut = layers.BatchNormalization()(shortcut)
+
+        # First convolution
+        y = layers.Conv2D(
+            filters, 3, strides=strides, padding="same", use_bias=False, kernel_initializer="he_normal"
+        )(x)
+        y = layers.BatchNormalization()(y)
+        y = layers.Activation(activation)(y)
+
+        # Second convolution
+        y = layers.Conv2D(
+            filters, 3, padding="same", use_bias=False, kernel_initializer="he_normal"
+        )(y)
+        y = layers.BatchNormalization()(y)
+
+        # Add shortcut
+        y = layers.Add()([shortcut, y])
+        y = layers.Activation(activation)(y)
+        return y
+
+    # -------------------------------------------------------------- #
+    # backbone (Improved ResNet-style)
     # -------------------------------------------------------------- #
     def _build_cnn_model(self) -> keras.Model:
-        """Simple CNN."""
-        cfg = [32, 32, 64, 64, 96, 96, 96, 128, 128, 128, 128, 192, 192]
-        pool_at = {1, 3, 6, 10}
+        """Builds a small ResNet-style CNN model."""
+        activation_func = "relu" # Or keep 'gelu' if preferred
 
         x_in = keras.Input(shape=MODEL_INPUT_SHAPE)
-        x = x_in
-        for i, f in enumerate(cfg):
-            x = layers.Conv2D(f, 3, padding="same", use_bias=False)(x)
-            x = layers.Activation(activation)(x)
-            x = _norm()(x)
-            if i in pool_at:
-                x = layers.MaxPooling2D(2)(x)
 
-        # 1×1 bottleneck
-        x = layers.Conv2D(256, 1, use_bias=False)(x)
-        x = layers.Activation(activation)(x)
-        x = _norm()(x)
+        # Initial Convolution (Stem) - adjusted for small 28x28 input
+        # No initial max pooling needed for 28x28
+        x = layers.Conv2D(32, 3, padding="same", use_bias=False, kernel_initializer="he_normal")(x_in)
+        x = layers.BatchNormalization()(x)
+        x = layers.Activation(activation_func)(x)
+        # x = layers.MaxPooling2D(pool_size=3, strides=2, padding='same')(x) # Optional: if more aggressive downsampling needed early
 
-        # classifier head
-        x = layers.GlobalAveragePooling2D()(x)
-        x = layers.Dense(128, activation=activation)(x)
-        x = layers.Dense(64, activation=activation)(x)
-        y_out = layers.Dense(NUM_CLASSES, activation="softmax")(x)
+        # Residual Blocks
+        # Block 1 (32 filters)
+        x = self._residual_block(x, 32, activation=activation_func)
+        x = self._residual_block(x, 32, activation=activation_func)
 
-        model = models.Model(x_in, y_out, name="simplenet_digits_ln")
+        # Block 2 (64 filters, downsample)
+        x = self._residual_block(x, 64, strides=2, activation=activation_func) # 28x28 -> 14x14
+        x = self._residual_block(x, 64, activation=activation_func)
+
+        # Block 3 (128 filters, downsample)
+        x = self._residual_block(x, 128, strides=2, activation=activation_func) # 14x14 -> 7x7
+        x = self._residual_block(x, 128, activation=activation_func)
+
+        # Block 4 (256 filters, downsample) - Optional, maybe too much for 7x7
+        # x = self._residual_block(x, 256, strides=2, activation=activation_func) # 7x7 -> 4x4
+        # x = self._residual_block(x, 256, activation=activation_func)
+
+        # Classifier Head
+        x = layers.GlobalAveragePooling2D()(x) # Feature vector
+        x = layers.Flatten()(x) # Ensure flat vector after GAP
+
+        x = layers.Dense(128, kernel_initializer="he_normal")(x)
+        x = layers.BatchNormalization()(x) # BN before activation in dense layers
+        x = layers.Activation(activation_func)(x)
+        x = layers.Dropout(0.5)(x) # Regularization
+
+        # Removed the intermediate 64-unit dense layer, maybe not needed
+        # x = layers.Dense(64, activation=activation_func, kernel_initializer="he_normal")(x)
+        # x = layers.Dropout(0.5)(x)
+
+        y_out = layers.Dense(NUM_CLASSES, activation="softmax")(x) # Output layer
+
+        model = models.Model(x_in, y_out, name="resnet_digits")
+
+        # Consider AdamW optimizer if available and needed
+        # optimizer = keras.optimizers.AdamW(learning_rate=3e-4, weight_decay=1e-4)
+        optimizer = keras.optimizers.Adam(learning_rate=3e-4)
+
         model.compile(
-            optimizer=keras.optimizers.Adam(3e-4),
+            optimizer=optimizer,
             loss="sparse_categorical_crossentropy",
             metrics=["accuracy"],
         )
@@ -219,54 +329,81 @@ class DigitClassifier:
         return model
 
     # -------------------------------------------------------------- #
-    # preprocessing (fixed – tolerant)
+    # preprocessing (fixed – tolerant, slightly adjusted target size)
     # -------------------------------------------------------------- #
     def _preprocess_cell_for_model(self, cell: np.ndarray) -> Optional[np.ndarray]:
         """
         Convert raw cell → 28×28 float32 in [0,1].
         Never raises; returns None only if `cell` itself is invalid.
         """
-        if cell is None or cell.size < 10:
+        if cell is None or cell.size < 10: # Basic check for validity
             return None
 
-        gray = (
-            cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY).astype("uint8")
-            if cell.ndim == 3
-            else cell.astype("uint8")
-        )
+        # Ensure input is grayscale uint8
+        if cell.ndim == 3 and cell.shape[2] == 3:
+            gray = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY)
+        elif cell.ndim == 2:
+            gray = cell
+        else: # Unexpected shape
+             return None # Or try to handle other cases like RGBA
 
-        # adaptive threshold, fall back to simple Otsu if OpenCV complains
+        # Ensure uint8 type for thresholding
+        if gray.dtype != np.uint8:
+             # Try to safely convert (e.g., scale if it's float)
+             if np.issubdtype(gray.dtype, np.floating):
+                 gray = (gray * 255).clip(0, 255).astype(np.uint8)
+             else:
+                 gray = gray.astype(np.uint8) # Hope for the best
+
+        # --- Thresholding ---
+        # Apply slight Gaussian blur before thresholding to reduce noise
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+
+        # Adaptive thresholding (robust to varying lighting)
         try:
-            blk = max(3, min(gray.shape) // 4) | 1
+            # Block size needs to be odd and > 1. Choose based on image size.
+            block_size = max(5, min(gray.shape[0], gray.shape[1]) // 4)
+            if block_size % 2 == 0: block_size += 1 # Ensure odd
             thresh = cv2.adaptiveThreshold(
-                gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, blk, 7
+                blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, block_size, 5 # C=5 is a decent starting point
             )
         except cv2.error:
-            _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            # Fallback to Otsu's method if adaptive fails (e.g., very small image)
+            _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
+        # --- Find digit bounding box ---
         pts = cv2.findNonZero(thresh)
-        if pts is None:  # looks empty – return black canvas
-            return np.zeros(self._model_input_size, dtype="float32")
+        if pts is None:  # Cell is empty or thresholding failed
+            return np.zeros(self._model_input_size, dtype="float32") # Return black canvas
 
         x, y, w, h = cv2.boundingRect(pts)
-        if w == 0 or h == 0:
+        if w <= 0 or h <= 0: # Should not happen if pts is not None, but check anyway
             return np.zeros(self._model_input_size, dtype="float32")
 
         roi = thresh[y : y + h, x : x + w]
 
-        scale = min(
-            TARGET_CELL_CONTENT_SIZE / max(1, w),
-            TARGET_CELL_CONTENT_SIZE / max(1, h),
-        )
+        # --- Resize and Center ---
+        # Calculate scaling factor to fit ROI into TARGET_CELL_CONTENT_SIZE box
+        # Use TARGET_CELL_CONTENT_SIZE (e.g., 26)
+        target_size = TARGET_CELL_CONTENT_SIZE
+        scale = min(target_size / w, target_size / h)
         new_w = max(1, int(round(w * scale)))
         new_h = max(1, int(round(h * scale)))
+
+        # Resize using INTER_AREA for shrinking
         resized = cv2.resize(roi, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-        canvas = np.zeros(self._model_input_size, np.uint8)
-        top = (self._model_input_size[0] - new_h) // 2
-        left = (self._model_input_size[1] - new_w) // 2
-        canvas[top : top + new_h, left : left + new_w] = resized
+        # Create target canvas (28x28)
+        canvas = np.zeros(self._model_input_size, dtype=np.uint8)
 
+        # Calculate padding to center the resized digit
+        pad_top = (self._model_input_size[0] - new_h) // 2
+        pad_left = (self._model_input_size[1] - new_w) // 2
+
+        # Place the resized digit onto the canvas
+        canvas[pad_top : pad_top + new_h, pad_left : pad_left + new_w] = resized
+
+        # Normalize to [0, 1] float32
         return canvas.astype("float32") / 255.0
 
     # -------------------------------------------------------------- #
@@ -279,14 +416,25 @@ class DigitClassifier:
         batch_size: int = BATCH_SIZE,
         validation_steps: int = VALIDATION_STEPS,
     ) -> None:
-        print(f"\nTraining: epochs={epochs}  batch={batch_size}")
+        print(f"\nTraining: epochs={epochs} steps={steps_per_epoch} batch={batch_size}")
+        if self.model is None:
+            self.model = self._build_cnn_model()
+        elif not isinstance(self.model, keras.Model):
+             print("[Error] self.model is not a valid Keras model. Cannot train.")
+             return
+
         try:
-            test_img, test_gt = generate_and_save_test_example()
-            epoch_cb = EpochTestCallback(test_img, test_gt, self)
+            test_img_path, test_gt = generate_and_save_test_example()
+            # Ensure classifier instance is passed correctly
+            epoch_cb = EpochTestCallback(test_img_path, test_gt, self)
+            if epoch_cb.preprocessed is None:
+                 print("[Warning] EpochTestCallback disabled due to preprocessing issues.")
+                 epoch_cb = None # Disable if setup failed
         except Exception as e:
-            print(f"[Warning] epoch‑callback disabled ({e})")
+            print(f"[Warning] Epoch-callback disabled during setup ({e})")
             epoch_cb = None
 
+        # Use a fresh renderer instance for each generator if state matters
         train_gen = sudoku_data_generator(
             SudokuRenderer(),
             batch_size,
@@ -300,34 +448,38 @@ class DigitClassifier:
             MODEL_INPUT_SHAPE,
         )
 
-        if self.model is None:
-            self.model = self._build_cnn_model()
-
+        # Callbacks
         cbs: list[callbacks.Callback] = [
             callbacks.EarlyStopping(
-                monitor="val_loss",
-                patience=5,
+                monitor="val_accuracy", # Monitor validation accuracy
+                patience=8,          # Increase patience slightly
                 restore_best_weights=True,
                 verbose=1,
+                mode='max' # We want to maximize accuracy
             ),
             callbacks.ModelCheckpoint(
                 filepath=self.model_path,
-                monitor="val_loss",
+                monitor="val_accuracy", # Save based on best validation accuracy
                 save_best_only=True,
                 verbose=1,
+                mode='max'
             ),
             callbacks.ReduceLROnPlateau(
-                monitor="val_loss",
-                factor=0.2,
-                patience=3,
-                min_lr=1e-6,
+                monitor="val_accuracy", # Reduce LR based on validation accuracy
+                factor=0.3,          # More aggressive reduction factor
+                patience=4,          # Reduce LR sooner if plateauing
+                min_lr=1e-7,
                 verbose=1,
+                mode='max'
             ),
+            # TensorBoard callback (optional, for visualization)
+            # callbacks.TensorBoard(log_dir='./logs', histogram_freq=1)
         ]
-        if epoch_cb and epoch_cb.preprocessed is not None:
+        if epoch_cb: # Add epoch test callback only if it was initialized successfully
             cbs.append(epoch_cb)
 
-        self.model.fit(
+        # Start Training
+        history = self.model.fit(
             train_gen,
             epochs=epochs,
             steps_per_epoch=steps_per_epoch,
@@ -337,125 +489,237 @@ class DigitClassifier:
             verbose=1,
         )
 
-        print("\nFinal evaluation:")
+        # Load best weights back if EarlyStopping restored them
+        # (ModelCheckpoint already saved the best one, but loading ensures the instance has them)
+        if self.model_path.exists():
+             print(f"Loading best weights from {self.model_path}")
+             self.model.load_weights(self.model_path) # Use load_weights if only weights were saved, or load_model if entire model
+
+        print("\nFinal evaluation using best weights:")
+        # Use a fresh generator for final evaluation
+        final_eval_gen = sudoku_data_generator(
+            SudokuRenderer(),
+            batch_size,
+            self._preprocess_cell_for_model,
+            MODEL_INPUT_SHAPE,
+        )
         loss, acc = self.model.evaluate(
-            sudoku_data_generator(
-                SudokuRenderer(),
-                batch_size,
-                self._preprocess_cell_for_model,
-                MODEL_INPUT_SHAPE,
-            ),
-            steps=validation_steps,
+            final_eval_gen,
+            steps=validation_steps * 2, # Evaluate on more steps
             verbose=1,
         )
-        print(f"val_loss={loss:.4f}  val_acc={acc:.4f}")
+        print(f"Final val_loss={loss:.5f}  val_acc={acc:.5f}")
 
+        # Explicitly save the final best model (ModelCheckpoint should have done this, but belt-and-suspenders)
+        print(f"Saving final best model to {self.model_path}")
         self.model.save(self.model_path)
-        del train_gen, val_gen
+
+        del train_gen, val_gen, final_eval_gen
         gc.collect()
 
     # -------------------------------------------------------------- #
     # inference
     # -------------------------------------------------------------- #
-    @torch.no_grad()
+    @torch.no_grad() # Keep torch decorator if using torch backend
     def recognise(
         self,
         cell: np.ndarray,
-        confidence_threshold: float = 0.7,
+        confidence_threshold: float = 0.9, # Increased default threshold
     ) -> Tuple[int, float]:
+        """Recognises a single digit cell."""
         if self.model is None:
+            print("[Error] Recognise called but model is not loaded.")
             return 0, 0.0
 
         proc = self._preprocess_cell_for_model(cell)
         if proc is None:
-            return 0, 0.0
+            # This indicates an issue with the input cell itself
+            # print("[Debug] Preprocessing returned None for a cell.")
+            return 0, 0.0 # Treat as empty/unrecognizable
 
-        x = torch.from_numpy(proc[np.newaxis, ..., np.newaxis]).float()
-        probs = self.model(x, training=False)[0]
-        if isinstance(probs, torch.Tensor):
+        # Add batch and channel dimensions: (H, W) -> (1, H, W, 1)
+        x = proc[np.newaxis, ..., np.newaxis]
+
+        # Predict using the Keras model
+        # The torch.no_grad() context manager is primarily for PyTorch operations.
+        # Keras with torch backend should handle inference mode correctly via training=False.
+        # If using pure torch tensors were necessary: x_tensor = torch.from_numpy(x).float()
+        probs = self.model(x, training=False) # Use training=False for inference
+
+        # Ensure probs is a NumPy array
+        if hasattr(probs, 'numpy'): # TF tensor
+            probs = probs.cpu().detach().numpy()
+        elif isinstance(probs, torch.Tensor): # PyTorch tensor
             probs = probs.cpu().numpy()
+        # If it's already numpy, do nothing
+
+        probs = probs[0] # Remove batch dimension
 
         idx = int(np.argmax(probs))
         conf = float(probs[idx])
+
+        # Return 0 (empty) if classified as EMPTY_LABEL or confidence is too low
         if idx == EMPTY_LABEL or conf < confidence_threshold:
-            return 0, conf
-        return idx, conf
+            # Optionally distinguish between low-conf digit and classified-empty
+            # if idx == EMPTY_LABEL: print(f"Cell classified as empty (conf {conf:.3f})")
+            # else: print(f"Cell classified as {idx} but low conf ({conf:.3f} < {confidence_threshold})")
+            return 0, conf # Return 0 for empty/uncertain
+        else:
+            # Return the classified digit (1-9)
+            return idx, conf
 
 
 # ------------------------------------------------------------------ #
-# 8.  epoch‑end callback (unchanged, except imports at top)
+# 8.  epoch‑end callback (Unchanged conceptually, ensure imports/refs are correct)
 # ------------------------------------------------------------------ #
 class EpochTestCallback(callbacks.Callback):
     def __init__(
         self,
         test_img_path: Path | str,
         gt_grid: np.ndarray,
-        classifier: "DigitClassifier",
+        classifier: "DigitClassifier", # Pass the classifier instance
         frequency: int = 1,
     ) -> None:
         super().__init__()
         self.frequency = max(1, frequency)
-        self.gt_grid = gt_grid
-        self.classifier = classifier
+        self.gt_grid = gt_grid.flatten() # Flatten GT grid for easier comparison
+        self.classifier = classifier # Store the classifier instance
+        self.test_img_path = test_img_path
+        self.preprocessed = None # Initialize as None
 
-        cells, _, _ = extract_cells_from_image(test_img_path, debug=False)
-        if not cells or len(cells) != GRID_SIZE * GRID_SIZE:
+        # --- Preprocessing moved to on_train_begin ---
+        # This ensures the classifier's model is built before preprocessing
+
+    def on_train_begin(self, logs=None):
+        # --- Preprocess test image cells here ---
+        # Ensures the model (and its input size) exists if built dynamically
+        print("[Callback] Preprocessing test example...")
+        try:
+            cells, _, _ = extract_cells_from_image(self.test_img_path, debug=False)
+            if not cells or len(cells) != GRID_SIZE * GRID_SIZE:
+                print(f"[Callback] Failed to extract correct number of cells ({len(cells)}) from {self.test_img_path}")
+                self.preprocessed = None
+                return
+
+            buf = []
+            model_input_size = self.classifier._model_input_size # Get from classifier
+            for i, cell in enumerate(cells):
+                proc = self.classifier._preprocess_cell_for_model(cell)
+                if proc is None:
+                    print(f"[Callback Warning] Preprocessing failed for cell {i}, using zeros.")
+                    proc = np.zeros(model_input_size, dtype="float32")
+                buf.append(proc)
+
+            self.preprocessed = np.asarray(buf, dtype="float32")[..., np.newaxis]
+            print(f"[Callback] Test example preprocessed successfully ({self.preprocessed.shape}).")
+
+        except Exception as e:
+            print(f"[Callback Error] Failed during test example preprocessing: {e}")
             self.preprocessed = None
-            print("[Callback] could not prepare test example – disabled")
-            return
 
-        buf = []
-        for cell in cells:
-            proc = classifier._preprocess_cell_for_model(cell)
-            if proc is None:
-                proc = np.zeros(classifier._model_input_size, dtype="float32")
-            buf.append(proc)
-        self.preprocessed = np.asarray(buf, dtype="float32")[..., np.newaxis]
 
     def on_epoch_end(self, epoch, logs=None):
-        if self.preprocessed is None or (epoch + 1) % self.frequency:
+        # Check if preprocessing was successful and if it's the right epoch
+        if self.preprocessed is None or (epoch + 1) % self.frequency != 0:
             return
 
-        probs = self.model.predict(self.preprocessed, verbose=0)
-        idxs = np.argmax(probs, axis=1)
-        confs = np.max(probs, axis=1)
+        if not hasattr(self.model, 'predict'):
+             print("[Callback Error] Model object does not have predict method.")
+             return
 
-        final = [
-            i
-            if (i != EMPTY_LABEL and c >= sudoku_recogniser.FINAL_CONFIDENCE_THRESHOLD)
-            else 0
-            for i, c in zip(idxs, confs)
-        ]
-        pred_grid = np.asarray(final).reshape(GRID_SIZE, GRID_SIZE)
-        conf_grid = confs.reshape(GRID_SIZE, GRID_SIZE)
+        print(f"\n--- Epoch {epoch+1} Test Example Evaluation ---")
+        try:
+            # Use the model attached to the callback (which is the one being trained)
+            probs = self.model.predict(self.preprocessed, verbose=0)
+            idxs = np.argmax(probs, axis=1)
+            confs = np.max(probs, axis=1)
 
-        print(f"\n--- Epoch {epoch+1} test example ---")
-        print("Ground truth:")
-        sudoku_recogniser.print_sudoku_grid(self.gt_grid, threshold=1.1)
-        print("Prediction:")
-        sudoku_recogniser.print_sudoku_grid(pred_grid, conf_grid)
-        ok = (pred_grid == self.gt_grid).sum()
-        print(f"Accuracy {ok}/81 = {ok/81:.4f}\n---\n")
+            # Apply the same logic as `recognise` for final prediction
+            # Use a reasonable threshold for display purposes
+            display_threshold = 0.7 # Lower than final recognition, just for display
+            final = [
+                i if (i != EMPTY_LABEL and c >= display_threshold) else 0
+                for i, c in zip(idxs, confs)
+            ]
+            pred_grid_flat = np.asarray(final)
+            pred_grid = pred_grid_flat.reshape(GRID_SIZE, GRID_SIZE)
+            conf_grid = confs.reshape(GRID_SIZE, GRID_SIZE)
+
+            print("Ground Truth:")
+            sudoku_recogniser.print_sudoku_grid(self.gt_grid.reshape(GRID_SIZE, GRID_SIZE)) # Reshape GT back
+            print("Prediction (Thresholded):")
+            sudoku_recogniser.print_sudoku_grid(pred_grid, conf_grid, threshold=display_threshold)
+
+            # Compare against the flattened ground truth
+            correct_cells = (pred_grid_flat == self.gt_grid).sum()
+            total_cells = GRID_SIZE * GRID_SIZE
+            accuracy = correct_cells / total_cells
+            print(f"Test Example Accuracy: {correct_cells}/{total_cells} = {accuracy:.4f}")
+            print("--- End Epoch Test ---\n")
+
+        except Exception as e:
+            print(f"[Callback Error] Failed during prediction or display: {e}")
 
 
 # ------------------------------------------------------------------ #
 # 9.  CLI helper
 # ------------------------------------------------------------------ #
 if __name__ == "__main__":
-    FORCE_TRAIN = True
-    if FORCE_TRAIN and Path(MODEL_FILENAME).exists():
-        Path(MODEL_FILENAME).unlink()
+    # Set to True to force retraining even if a model file exists
+    FORCE_TRAIN = False # Set to True to retrain
 
-    clf = DigitClassifier(training_required=FORCE_TRAIN)
-    if clf.model is None:
+    model_file = Path(MODEL_FILENAME)
+    train_needed = FORCE_TRAIN or not model_file.exists()
+
+    if FORCE_TRAIN and model_file.exists():
+        print(f"FORCE_TRAIN is True. Deleting existing model: {model_file}")
+        try:
+            model_file.unlink()
+            train_needed = True # Ensure flag is set
+        except OSError as e:
+            print(f"Error deleting existing model: {e}")
+            # Decide whether to proceed or exit
+            # exit(1)
+
+    # Instantiate the classifier. It will try to load if train_needed is False.
+    clf = DigitClassifier(model_path=model_file, training_required=train_needed)
+
+    # Train if needed (either forced or because loading failed/file missing)
+    if train_needed:
+        print("Starting training process...")
         clf.train()
+        # After training, the best model should be saved and loaded by the train method.
+        # Verify the model is loaded for the sanity check below.
+        if clf.model is None:
+             print("[Error] Training finished, but model is still None. Cannot proceed.")
+             exit(1) # Exit if training failed to produce a model
+    elif clf.model is None:
+         print("[Error] Model loading failed, and training was not requested. Cannot proceed.")
+         exit(1) # Exit if no model is available
+    else:
+         print("Model loaded successfully. Skipping training.")
 
+
+    # Perform sanity check only if the model is available
     if clf.model:
         print("\nQuick sanity check:")
-        dummy = np.zeros((50, 50), np.uint8)
-        cv2.line(dummy, (25, 10), (25, 40), 255, 3)
-        d, c = clf.recognise(dummy, 0.5)
-        print(f"Vertical stroke → {d}  (conf {c:.3f})")
+
+        # Test 1: Vertical stroke (should ideally be 1)
+        dummy1 = np.zeros((50, 50), np.uint8)
+        cv2.line(dummy1, (25, 10), (25, 40), 255, 4) # Thicker line
+        d1, c1 = clf.recognise(dummy1, confidence_threshold=0.5) # Use lower threshold for test
+        print(f"Vertical stroke → {d1}  (conf {c1:.3f})")
+
+        # Test 2: Blank cell (should be 0)
         blank = np.zeros((50, 50), np.uint8)
-        d, c = clf.recognise(blank, 0.5)
-        print(f"Blank cell     → {d}  (conf {c:.3f})")
+        d0, c0 = clf.recognise(blank, confidence_threshold=0.5)
+        print(f"Blank cell      → {d0}  (conf {c0:.3f})")
+
+        # Test 3: A simple digit (e.g., '7')
+        dummy7 = np.zeros((50, 50), np.uint8)
+        cv2.putText(dummy7, '7', (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.5, 255, 3)
+        d7, c7 = clf.recognise(dummy7, confidence_threshold=0.5)
+        print(f"Digit '7'       → {d7}  (conf {c7:.3f})")
+
+    else:
+        print("\nSanity check skipped: No model available.")
