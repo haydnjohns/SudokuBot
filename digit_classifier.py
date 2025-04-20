@@ -142,10 +142,10 @@ def sudoku_data_generator(
 
 
 # ------------------------------------------------------------------ #
-# 6.  helper for LayerNorm
+# 6.  helper for normalization
 # ------------------------------------------------------------------ #
 def _norm():
-    return layers.LayerNormalization(epsilon=1e-5)
+    return layers.BatchNormalization(epsilon=1e-5)
 
 
 # ------------------------------------------------------------------ #
@@ -181,7 +181,7 @@ class DigitClassifier:
     # backbone
     # -------------------------------------------------------------- #
     def _build_cnn_model(self) -> keras.Model:
-        """Simple CNN with LayerNorm."""
+        """Simple CNN."""
         cfg = [32, 32, 64, 64, 96, 96, 96, 128, 128, 128, 128, 192, 192]
         pool_at = {1, 3, 6, 10}
 
