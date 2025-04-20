@@ -26,8 +26,6 @@ import cv2
 import numpy as np
 import torch
 import keras
-import threading
-import queue
 from keras import callbacks, layers, models, activations
 
 # ------------------------------------------------------------------ #
@@ -141,36 +139,6 @@ def sudoku_data_generator(
         yield x_arr[p], y_arr[p]
         del xs, ys, x_arr, y_arr
         gc.collect()
-
-# ------------------------------------------------------------------ #
-# Async prefetching wrapper
-# ------------------------------------------------------------------ #
-class ThreadedGenerator:
-    """
-    Wrap a Python generator in a background thread with a fixed-size queue,
-    so that the next batch is prefetched asynchronously.
-    """
-    def __init__(self, gen, max_prefetch: int = 1):
-        self._gen = gen
-        self._queue: "queue.Queue[object]" = queue.Queue(max_prefetch)
-        self._sentinel = object()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def _run(self):
-        for item in self._gen:
-            self._queue.put(item)
-        # signal end-of-stream
-        self._queue.put(self._sentinel)
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        item = self._queue.get()
-        if item is self._sentinel:
-            raise StopIteration
-        return item
 
 
 # ------------------------------------------------------------------ #
@@ -319,24 +287,17 @@ class DigitClassifier:
             print(f"[Warning] epoch‑callback disabled ({e})")
             epoch_cb = None
 
-        # wrap generators to prefetch batches asynchronously
-        train_gen = ThreadedGenerator(
-            sudoku_data_generator(
-                SudokuRenderer(),
-                batch_size,
-                self._preprocess_cell_for_model,
-                MODEL_INPUT_SHAPE,
-            ),
-            max_prefetch=1,
+        train_gen = sudoku_data_generator(
+            SudokuRenderer(),
+            batch_size,
+            self._preprocess_cell_for_model,
+            MODEL_INPUT_SHAPE,
         )
-        val_gen = ThreadedGenerator(
-            sudoku_data_generator(
-                SudokuRenderer(),
-                batch_size,
-                self._preprocess_cell_for_model,
-                MODEL_INPUT_SHAPE,
-            ),
-            max_prefetch=1,
+        val_gen = sudoku_data_generator(
+            SudokuRenderer(),
+            batch_size,
+            self._preprocess_cell_for_model,
+            MODEL_INPUT_SHAPE,
         )
 
         if self.model is None:
@@ -377,16 +338,12 @@ class DigitClassifier:
         )
 
         print("\nFinal evaluation:")
-        # evaluate with prefetched validation data
         loss, acc = self.model.evaluate(
-            ThreadedGenerator(
-                sudoku_data_generator(
-                    SudokuRenderer(),
-                    batch_size,
-                    self._preprocess_cell_for_model,
-                    MODEL_INPUT_SHAPE,
-                ),
-                max_prefetch=1,
+            sudoku_data_generator(
+                SudokuRenderer(),
+                batch_size,
+                self._preprocess_cell_for_model,
+                MODEL_INPUT_SHAPE,
             ),
             steps=validation_steps,
             verbose=1,
