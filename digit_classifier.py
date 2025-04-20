@@ -197,7 +197,7 @@ class DigitClassifier:
 
         model = keras.Model(x_in, y_out, name="simplenet_digits_ln")
         model.compile(
-            optimizer=keras.optimizers.Adam(1e‑3),
+            optimizer=keras.optimizers.Adam(1e-3),
             loss="sparse_categorical_crossentropy",
             metrics=["accuracy"],
         )
