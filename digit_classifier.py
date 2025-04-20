@@ -31,7 +31,7 @@ from keras import callbacks, layers, models
 # ------------------------------------------------------------------ #
 from sudoku_renderer import SudokuRenderer, generate_and_save_test_example
 from digit_extractor import GRID_SIZE, extract_cells_from_image, rectify_grid, split_into_cells
-from sudoku_recogniser import FINAL_CONFIDENCE_THRESHOLD, print_sudoku_grid
+import sudoku_recogniser
 
 
 # ------------------------------------------------------------------ #
@@ -380,16 +380,16 @@ class EpochTestCallback(callbacks.Callback):
         idxs = np.argmax(probs, axis=1)
         confs = np.max(probs, axis=1)
 
-        final = [(i if (i != EMPTY_LABEL and c >= FINAL_CONFIDENCE_THRESHOLD) else 0)
+        final = [(i if (i != EMPTY_LABEL and c >= sudoku_recogniser.FINAL_CONFIDENCE_THRESHOLD) else 0)
                  for i, c in zip(idxs, confs)]
         pred_grid = np.asarray(final).reshape(GRID_SIZE, GRID_SIZE)
         conf_grid = confs.reshape(GRID_SIZE, GRID_SIZE)
 
         print(f"\n--- Epoch {epoch+1} test example ---")
         print("Ground truth:")
-        print_sudoku_grid(self.gt_grid, threshold=1.1)
+        sudoku_recogniser.print_sudoku_grid(self.gt_grid, threshold=1.1)
         print("Prediction:")
-        print_sudoku_grid(pred_grid, conf_grid)
+        sudoku_recogniser.print_sudoku_grid(pred_grid, conf_grid)
         ok = (pred_grid == self.gt_grid).sum()
         print(f"Accuracy {ok}/81 = {ok/81:.4f}\n---\n")
 
@@ -398,7 +398,7 @@ class EpochTestCallback(callbacks.Callback):
 # 8.  CLI-helper (unchanged)
 # ------------------------------------------------------------------ #
 if __name__ == "__main__":
-    FORCE_TRAIN = False
+    FORCE_TRAIN = True
     if FORCE_TRAIN and Path(MODEL_FILENAME).exists():
         Path(MODEL_FILENAME).unlink()
 
