@@ -391,6 +391,7 @@ class DigitClassifier:
     # ------------------------------------------------------------------ #
     def _augment_grid(self, grid_img: np.ndarray) -> np.ndarray:
         """Apply augmentations to the full grid image."""
+        original_shape = grid_img.shape # Remember the original shape (H, W, C)
         h, w = grid_img.shape[:2]
         augmented = grid_img.copy()
 
@@ -399,14 +400,16 @@ class DigitClassifier:
             angle = random.uniform(-8, 8) # Reduced angle for full grid
             M_rot = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
             augmented = cv2.warpAffine(augmented, M_rot, (w, h), borderMode=cv2.BORDER_CONSTANT, borderValue=0) # Black border
+            # warpAffine might strip the last dimension if it's 1
 
         # 2. Small Translation
         if random.random() < 0.5:
             tx = random.uniform(-w * 0.03, w * 0.03) # Max 3% translation
             ty = random.uniform(-h * 0.03, h * 0.03)
             M_trans = np.float32([[1, 0, tx], [0, 1, ty]])
+            # warpAffine might strip the last dimension if it's 1
             augmented = cv2.warpAffine(augmented, M_trans, (w, h), borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-
+            
         # 3. Brightness/Contrast Jitter
         if random.random() < 0.6:
             alpha = random.uniform(0.85, 1.15) # Contrast
@@ -417,6 +420,11 @@ class DigitClassifier:
         if random.random() < 0.3:
             noise = np.random.normal(0, random.uniform(0.01, 0.05), augmented.shape)
             augmented = np.clip(augmented + noise, 0.0, 1.0)
+
+        # Ensure channel dimension exists if it was stripped by warpAffine
+        # Check if original had 3 dims (H, W, 1) and current has 2 (H, W)
+        if len(original_shape) == 3 and original_shape[2] == 1 and len(augmented.shape) == 2:
+            augmented = augmented[..., np.newaxis]
 
         # Ensure output is float32
         return augmented.astype("float32")
