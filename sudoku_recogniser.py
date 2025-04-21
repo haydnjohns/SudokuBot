@@ -40,7 +40,7 @@ def print_sudoku_grid(
     print("-" * 25) # Top border
     for r in range(GRID_SIZE):
         if r > 0 and r % 3 == 0:
-            print("|-------+-------+-------|") # Separator line
+            print("|---------+---------+---------|") # Separator line
 
         line = ["|"] # Start of row
         for c in range(GRID_SIZE):
