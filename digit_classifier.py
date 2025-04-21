@@ -471,6 +471,7 @@ class DigitClassifier:
         steps_per_epoch: int = STEPS_PER_EPOCH,
         batch_size: int = BATCH_SIZE,
         validation_steps: int = VALIDATION_STEPS,
+        dump_examples: bool = False,
     ) -> None:
         print(f"\nTraining: epochs={epochs} steps={steps_per_epoch} batch={batch_size}")
         if self.model is None:
@@ -515,26 +516,27 @@ class DigitClassifier:
             MODEL_INPUT_SHAPE,
         )
         # ------------------------------------------------------------------
-        # Dump a batch of augmented training samples *after* preprocessing/augmentation
-        dump_dir = Path("dumped_training_samples")
-        dump_dir.mkdir(exist_ok=True)
-        try:
-            vis_gen = sudoku_data_generator(
-                SudokuRenderer(),
-                batch_size,
-                train_preproc,
-                MODEL_INPUT_SHAPE,
-            )
-            x_vis, y_vis = next(vis_gen)
-            n_dump = min(32, x_vis.shape[0])
-            for i in range(n_dump):
-                # convert float32 [0,1] → uint8 [0,255]
-                img = (x_vis[i, ..., 0] * 255).astype(np.uint8)
-                label = y_vis[i]
-                cv2.imwrite(str(dump_dir / f"sample_{i}_label_{label}.png"), img)
-            print(f"[Info] Dumped {n_dump} augmented training samples to {dump_dir}")
-        except Exception as e:
-            print(f"[Warning] Could not dump training samples: {e}")
+        # Optional: Dump a batch of augmented training samples after preprocessing/augmentation
+        if dump_examples:
+            dump_dir = Path("dumped_training_samples")
+            dump_dir.mkdir(exist_ok=True)
+            try:
+                vis_gen = sudoku_data_generator(
+                    SudokuRenderer(),
+                    batch_size,
+                    train_preproc,
+                    MODEL_INPUT_SHAPE,
+                )
+                x_vis, y_vis = next(vis_gen)
+                n_dump = min(32, x_vis.shape[0])
+                for i in range(n_dump):
+                    # convert float32 [0,1] → uint8 [0,255]
+                    img = (x_vis[i, ..., 0] * 255).astype(np.uint8)
+                    label = y_vis[i]
+                    cv2.imwrite(str(dump_dir / f"sample_{i}_label_{label}.png"), img)
+                print(f"[Info] Dumped {n_dump} augmented training samples to {dump_dir}")
+            except Exception as e:
+                print(f"[Warning] Could not dump training samples: {e}")
 
         # Callbacks
         cbs: list[callbacks.Callback] = [
