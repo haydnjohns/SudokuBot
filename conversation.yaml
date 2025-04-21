@@ -524,6 +524,27 @@ local_system:
                   self._preprocess_cell_for_model,
                   MODEL_INPUT_SHAPE,
               )
+              # ------------------------------------------------------------------
+              # Dump a batch of augmented training samples *after* preprocessing/augmentation
+              dump_dir = Path("dumped_training_samples")
+              dump_dir.mkdir(exist_ok=True)
+              try:
+                  vis_gen = sudoku_data_generator(
+                      SudokuRenderer(),
+                      batch_size,
+                      train_preproc,
+                      MODEL_INPUT_SHAPE,
+                  )
+                  x_vis, y_vis = next(vis_gen)
+                  n_dump = min(32, x_vis.shape[0])
+                  for i in range(n_dump):
+                      # convert float32 [0,1] → uint8 [0,255]
+                      img = (x_vis[i, ..., 0] * 255).astype(np.uint8)
+                      label = y_vis[i]
+                      cv2.imwrite(str(dump_dir / f"sample_{i}_label_{label}.png"), img)
+                  print(f"[Info] Dumped {n_dump} augmented training samples to {dump_dir}")
+              except Exception as e:
+                  print(f"[Warning] Could not dump training samples: {e}")
 
               # Callbacks
               cbs: list[callbacks.Callback] = [
@@ -1826,6 +1847,27 @@ local_system:
                   self._preprocess_cell_for_model,
                   MODEL_INPUT_SHAPE,
               )
+              # ------------------------------------------------------------------
+              # Dump a batch of augmented training samples *after* preprocessing/augmentation
+              dump_dir = Path("dumped_training_samples")
+              dump_dir.mkdir(exist_ok=True)
+              try:
+                  vis_gen = sudoku_data_generator(
+                      SudokuRenderer(),
+                      batch_size,
+                      train_preproc,
+                      MODEL_INPUT_SHAPE,
+                  )
+                  x_vis, y_vis = next(vis_gen)
+                  n_dump = min(32, x_vis.shape[0])
+                  for i in range(n_dump):
+                      # convert float32 [0,1] → uint8 [0,255]
+                      img = (x_vis[i, ..., 0] * 255).astype(np.uint8)
+                      label = y_vis[i]
+                      cv2.imwrite(str(dump_dir / f"sample_{i}_label_{label}.png"), img)
+                  print(f"[Info] Dumped {n_dump} augmented training samples to {dump_dir}")
+              except Exception as e:
+                  print(f"[Warning] Could not dump training samples: {e}")
 
               # Callbacks
               cbs: list[callbacks.Callback] = [
@@ -2616,7 +2658,8 @@ system:
 
     You are a helpful assistant.
     Respond in markdown format.
-    Respond with a git diff patch for any modified or added files. Use the ```diff markdown code block.
+    Respond with the full code for any modified or added files. No placeholders.
+    A git diff uses "+" or "-" at the start lines. Do NOT use "+" or "-" at the start of any line (unless incidental and not part of a git diff).
     Avoid asking the user to clear their caches or do local configuration related stuff. That's rarely the cause of errors.
     If you ask them, and they reply with a compilation error, assume they've already done everything you suggested and move on.
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
@@ -2629,7 +2672,7 @@ system:
     - gemini/gemini-2.0-flash-thinking-exp-01-21
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: git
+  apply_mode: simple
 messages:
   - user: |-
       ```python 'digit_classifier.py'
@@ -3149,6 +3192,27 @@ messages:
                   self._preprocess_cell_for_model,
                   MODEL_INPUT_SHAPE,
               )
+              # ------------------------------------------------------------------
+              # Dump a batch of augmented training samples *after* preprocessing/augmentation
+              dump_dir = Path("dumped_training_samples")
+              dump_dir.mkdir(exist_ok=True)
+              try:
+                  vis_gen = sudoku_data_generator(
+                      SudokuRenderer(),
+                      batch_size,
+                      train_preproc,
+                      MODEL_INPUT_SHAPE,
+                  )
+                  x_vis, y_vis = next(vis_gen)
+                  n_dump = min(32, x_vis.shape[0])
+                  for i in range(n_dump):
+                      # convert float32 [0,1] → uint8 [0,255]
+                      img = (x_vis[i, ..., 0] * 255).astype(np.uint8)
+                      label = y_vis[i]
+                      cv2.imwrite(str(dump_dir / f"sample_{i}_label_{label}.png"), img)
+                  print(f"[Info] Dumped {n_dump} augmented training samples to {dump_dir}")
+              except Exception as e:
+                  print(f"[Warning] Could not dump training samples: {e}")
 
               # Callbacks
               cbs: list[callbacks.Callback] = [
@@ -3951,56 +4015,222 @@ messages:
       ```
     metadata:
       filename: sudoku_renderer.py
-  - user: It's hard to see here what the model is actually training on. Make it so
-      some examples are dumped to a file. Ensure they're dumped *after* any transformations/augmentations
-      are made. ie we want to see what the neural net sees.
+  - user: Modify this to not use MNIST or any handwritten digits, but to only use
+      computer font digits. Use a few different fonts.
     metadata:
   - assistant: |-
-      ```diff
-      diff --git a/digit_classifier.py b/digit_classifier.py
-      index ############..############ 100644
-      --- a/digit_classifier.py
-      +++ b/digit_classifier.py
-      @@ def train(
-               val_gen = sudoku_data_generator(
-                   SudokuRenderer(),
-                   batch_size,
-                   self._preprocess_cell_for_model,
-                   MODEL_INPUT_SHAPE,
-               )
-      +        # ------------------------------------------------------------------
-      +        # Dump a batch of augmented training samples *after* preprocessing/augmentation
-      +        dump_dir = Path("dumped_training_samples")
-      +        dump_dir.mkdir(exist_ok=True)
-      +        try:
-      +            vis_gen = sudoku_data_generator(
-      +                SudokuRenderer(),
-      +                batch_size,
-      +                train_preproc,
-      +                MODEL_INPUT_SHAPE,
-      +            )
-      +            x_vis, y_vis = next(vis_gen)
-      +            n_dump = min(32, x_vis.shape[0])
-      +            for i in range(n_dump):
-      +                # convert float32 [0,1] → uint8 [0,255]
-      +                img = (x_vis[i, ..., 0] * 255).astype(np.uint8)
-      +                label = y_vis[i]
-      +                cv2.imwrite(str(dump_dir / f"sample_{i}_label_{label}.png"), img)
-      +            print(f"[Info] Dumped {n_dump} augmented training samples to {dump_dir}")
-      +        except Exception as e:
-      +            print(f"[Warning] Could not dump training samples: {e}")
-       
-               # Callbacks
-               cbs: list[callbacks.Callback] = [
+      ```python
+      # sudoku_renderer.py
+      """
+      Synthetic Sudoku image generator for on‑the‑fly training data.
+      Uses only computer fonts (no MNIST).
+      """
+
+      import random
+      from pathlib import Path
+      from typing import Tuple, Optional, List
+
+      import cv2
+      import numpy as np
+
+      GRID_SIZE = 9
+      BASE_IMAGE_SIZE = 1000
+      CELL_SIZE = BASE_IMAGE_SIZE // GRID_SIZE
+
+
+      def _order_points(pts: np.ndarray) -> np.ndarray:
+          """Order four points as TL, TR, BR, BL."""
+          pts = pts.reshape(4, 2).astype("float32")
+          rect = np.zeros((4, 2), dtype="float32")
+          s = pts.sum(axis=1)
+          rect[0] = pts[np.argmin(s)]
+          rect[2] = pts[np.argmax(s)]
+          diff = pts[:, 1] - pts[:, 0]
+          rect[1] = pts[np.argmin(diff)]
+          rect[3] = pts[np.argmax(diff)]
+          return rect
+
+
+      class SudokuRenderer:
+          """
+          Render a random (or specified) Sudoku grid to a synthetic image,
+          using a variety of computer fonts.
+          """
+
+          def __init__(self) -> None:
+              # A selection of built‑in OpenCV fonts
+              self.fonts: List[int] = [
+                  cv2.FONT_HERSHEY_SIMPLEX,
+                  cv2.FONT_HERSHEY_COMPLEX,
+                  cv2.FONT_HERSHEY_DUPLEX,
+                  cv2.FONT_HERSHEY_TRIPLEX,
+                  cv2.FONT_HERSHEY_SCRIPT_SIMPLEX,
+              ]
+
+          def render_sudoku(
+              self,
+              grid_spec: Optional[List[List[Optional[int]]]] = None,
+              *,
+              allow_empty: bool = True
+          ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+              """
+              Generate a synthetic Sudoku image.
+              Returns (image, ground_truth_grid, warped_corners).
+              """
+              # Prepare ground truth grid
+              if grid_spec is None:
+                  gt = np.zeros((GRID_SIZE, GRID_SIZE), int)
+                  for r in range(GRID_SIZE):
+                      for c in range(GRID_SIZE):
+                          if allow_empty and random.random() < 0.4:
+                              continue
+                          gt[r, c] = random.randint(1, 9)
+              else:
+                  gt = np.array([[d or 0 for d in row] for row in grid_spec], int)
+
+              # Create background
+              bg = tuple(random.randint(200, 240) for _ in range(3))
+              img = np.full((BASE_IMAGE_SIZE, BASE_IMAGE_SIZE, 3), bg, np.uint8)
+
+              # Draw grid lines
+              for i in range(GRID_SIZE + 1):
+                  major = (i % 3 == 0)
+                  thickness = random.randint(3 if major else 1, 5 if major else 3)
+                  y = i * CELL_SIZE
+                  x = i * CELL_SIZE
+                  cv2.line(img, (0, y), (BASE_IMAGE_SIZE, y), (0, 0, 0), thickness)
+                  cv2.line(img, (x, 0), (x, BASE_IMAGE_SIZE), (0, 0, 0), thickness)
+
+              # Draw digits using only fonts
+              for r in range(GRID_SIZE):
+                  for c in range(GRID_SIZE):
+                      d = gt[r, c]
+                      if d == 0:
+                          continue
+
+                      # Compute target size for digit
+                      scale = random.uniform(0.5, 0.8)
+                      tgt = int(CELL_SIZE * scale)
+                      # Center of the cell with slight random offset
+                      center_x = c * CELL_SIZE + CELL_SIZE // 2
+                      center_y = r * CELL_SIZE + CELL_SIZE // 2
+                      dx = int(random.uniform(-0.1, 0.1) * CELL_SIZE)
+                      dy = int(random.uniform(-0.1, 0.1) * CELL_SIZE)
+                      cx, cy = center_x + dx, center_y + dy
+
+                      # Randomly pick font and thickness
+                      font = random.choice(self.fonts)
+                      thickness = random.randint(1, 3)
+                      # Add small variability to desired height
+                      desired_height = int(tgt * random.uniform(0.8, 1.2))
+                      font_scale = cv2.getFontScaleFromHeight(font, desired_height, thickness)
+
+                      text = str(d)
+                      (tw, th), _ = cv2.getTextSize(text, font, font_scale, thickness)
+                      x = cx - tw // 2
+                      y = cy + th // 2
+
+                      cv2.putText(
+                          img,
+                          text,
+                          (x, y),
+                          font,
+                          font_scale,
+                          (0, 0, 0),
+                          thickness,
+                          cv2.LINE_AA,
+                      )
+
+              # Add noise
+              noise = np.random.normal(0, random.uniform(5, 20), img.shape).astype(np.float32)
+              noisy = np.clip(img.astype(np.float32) + noise, 0, 255).astype(np.uint8)
+
+              # Random perspective warp
+              h, w = noisy.shape[:2]
+              orig = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], dtype="float32")
+              shift = random.uniform(0.05, 0.2)
+              max_dx, max_dy = w * shift, h * shift
+              dst = np.array(
+                  [
+                      [random.uniform(0, max_dx), random.uniform(0, max_dy)],
+                      [w - 1 - random.uniform(0, max_dx), random.uniform(0, max_dy)],
+                      [
+                          w - 1 - random.uniform(-max_dx * 0.2, max_dx),
+                          h - 1 - random.uniform(0, max_dy),
+                      ],
+                      [random.uniform(-max_dx * 0.2, max_dx), h - 1 - random.uniform(0, max_dy)],
+                  ],
+                  dtype="float32",
+              )
+              M = cv2.getPerspectiveTransform(orig, dst)
+              out_w = int(dst[:, 0].max()) + 1
+              out_h = int(dst[:, 1].max()) + 1
+              warped = cv2.warpPerspective(
+                  noisy, M, (out_w, out_h), borderMode=cv2.BORDER_REPLICATE
+              )
+
+              return warped, gt, dst
+
+
+      def generate_and_save_test_example(
+          prefix: str = "epoch_test_sudoku",
+          force: bool = False
+      ) -> Tuple[str, np.ndarray]:
+          """
+          Generate or load a fixed Sudoku test example for epoch callbacks.
+          Returns (image_path, ground_truth_grid).
+          """
+          import cv2 as _cv2, numpy as _np
+
+          img_path = Path(f"{prefix}.png")
+          gt_path = Path(f"{prefix}_gt.npy")
+
+          if not force and img_path.exists() and gt_path.exists():
+              return str(img_path), _np.load(gt_path)
+
+          renderer = SudokuRenderer()
+          grid_spec = [
+              [None, None, 3, None, None, 6, None, 8, None],
+              [8, None, 1, None, 3, None, 5, None, 4],
+              [None, 4, None, 8, None, 7, None, 1, None],
+              [1, None, None, 4, None, 5, None, None, 9],
+              [None, 7, None, None, 2, None, None, 4, None],
+              [5, None, None, 7, None, 1, None, None, 3],
+              [None, 8, None, 5, None, 3, None, 9, None],
+              [7, None, 4, None, 9, None, 1, None, 8],
+              [None, 1, None, 6, None, None, 4, None, None],
+          ]
+          img, gt, _ = renderer.render_sudoku(grid_spec=grid_spec)
+          _cv2.imwrite(str(img_path), img)
+          _np.save(gt_path, gt)
+          return str(img_path), gt
       ```
     metadata:
   - user: |
-      Git apply result:
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: digit_classifier.py
-      Applying patch to 'digit_classifier.py' using custom patcher...
-      Successfully applied patch and wrote to digit_classifier.py.
+      Identified target file '# sudoku_renderer.py' on fence open line 1:
+      ```python
+      Found 1 code blocks.
+      Matching against available files:
+        1: digit_extractor.py
+        2: sudoku_recogniser.py
+        3: digit_classifier.py
+        4: sudoku_renderer.py
+      --- Phase 1: Processing explicit file paths in fences ---
+      Warning: Explicit file path '# sudoku_renderer.py' in fence not in attached files (['digit_extractor.py', 'sudoku_recogniser.py', 'digit_classifier.py', 'sudoku_renderer.py']). Skipping block.
+      Remaining unassigned blocks: 1, Available files: 4
+      --- Phase 2: Checking preceding lines for hints ---
+      Remaining unassigned blocks: 1, Available files: 4
+      --- Phase 3: Checking first lines inside blocks for hints ---
+      Remaining unassigned blocks: 1, Available files: 4
+      --- Phase 4: Applying single remaining block heuristic ---
+      Attempting single block heuristic for 4 available files.
+        - Similarity with digit_extractor.py: 0.12
+        - Similarity with sudoku_recogniser.py: 0.07
+        - Similarity with digit_classifier.py: 0.01
+        - Similarity with sudoku_renderer.py: 0.22
+      Assigned single remaining block to best match: sudoku_renderer.py (similarity: 0.22).
+      Remaining unassigned blocks: 0, Available files: 3
+      --- Phase 6: Applying changes to assigned files ---
+      Successfully updated file: sudoku_renderer.py
     metadata:
 ...
