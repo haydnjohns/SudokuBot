@@ -69,7 +69,7 @@ EMPTY_LABEL = 10
 TARGET_CELL_CONTENT_SIZE = 26          # preprocessing (Increased slightly)
 TARGET_DIGIT_RATIO = 1.5               # 60 % digits / 40 % empty
 
-EPOCHS = 15 # Increased epochs slightly, EarlyStopping will handle it
+EPOCHS = 10 # Increased epochs slightly, EarlyStopping will handle it
 STEPS_PER_EPOCH = 150 # Increased steps slightly
 BATCH_SIZE = 256
 VALIDATION_STEPS = 50
