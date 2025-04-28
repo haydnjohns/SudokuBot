@@ -1,16 +1,28 @@
-import numpy as np
-import cv2
 import math
+import sys
+import threading  # Allows motors to run simultaneously
+import time
 from time import sleep
+
+import cv2
+import numpy as np
 from gpiozero import OutputDevice
 from skimage.segmentation import clear_border
-import threading  # Allows motors to run simultaneously
+
 try:
     # Try for pi
     from ai_edge_litert.interpreter import Interpreter
 except ModuleNotFoundError:
     # Fallback to full TensorFlow (for Mac / PC)
     from tensorflow.lite.python.interpreter import Interpreter
+
+# Increase recursion depth limit for potentially deep searches in complex puzzles
+try:
+    # Setting a high limit, adjust based on system capabilities and puzzle difficulty
+    sys.setrecursionlimit(3000)
+except Exception as e:
+    print(f"Warning: Could not set recursion depth limit: {e}", file=sys.stderr)
+
 
 def preprocess_image(image_path, debug=False):
     image = cv2.imread(image_path)
@@ -335,36 +347,325 @@ def print_virtual_board(board):
     # Print the bottom border after the last row
     print("+ - - - + - - - + - - - +")
 
-def solve_sudoku(board):
-    def is_valid(board, row, col, num):
-        # Check row
-        if num in board[row]:
-            return False
-        # Check column
-        if num in board[:, col]:
-            return False
-        # Check 3x3 box
-        start_row, start_col = 3 * (row // 3), 3 * (col // 3)
-        if num in board[start_row:start_row+3, start_col:start_col+3]:
-            return False
-        return True
+def solve_sudoku(grid):
+    """
+    Solves a 9x9 Sudoku puzzle represented by a NumPy ndarray using Dancing Links (Algorithm X).
+    Corrected version addressing IndexError.
 
-    def solve(board):
-        for row in range(9):
-            for col in range(9):
-                if board[row, col] == 0:
-                    for num in range(1, 10):
-                        if is_valid(board, row, col, num):
-                            board[row, col] = num
-                            if solve(board):
-                                return True
-                            board[row, col] = 0
-                    return False  # No valid number found, backtrack
-        return True  # Solved!
+    Args:
+        grid: A 9x9 NumPy ndarray representing the Sudoku puzzle,
+              with 0 for empty cells. dtype should be integer-compatible.
 
-    board_copy = board.copy()  # Avoid modifying the original board
-    solve(board_copy)
-    return board_copy
+    Returns:
+        A 9x9 NumPy ndarray representing the solved Sudoku grid (dtype=int),
+        or None if no solution exists or the input is invalid.
+    """
+    N = 9
+    N_SQ = N * N
+    NUM_CONSTRAINTS = N_SQ * 4 # Cell(81), Row(81), Col(81), Box(81)
+    ROOT_IDX = 0 # CORRECTED: Root node is the first node added (index 0)
+
+    # --- Node Structure Indices ---
+    # Each node is represented as a list: [L, R, U, D, CH, RID]
+    L, R, U, D, CH, RID = 0, 1, 2, 3, 4, 5 # Indices for node attributes
+
+    # --- Input Validation ---
+    if not isinstance(grid, np.ndarray) or grid.shape != (N, N):
+        raise ValueError(f"Input grid must be a {N}x{N} NumPy ndarray.")
+    if not np.issubdtype(grid.dtype, np.integer):
+         print(f"Warning: Grid dtype is {grid.dtype}, converting to int.", file=sys.stderr)
+         grid = grid.astype(int)
+    if np.any((grid < 0) | (grid > N)):
+        print("Error: Grid contains values outside the range 0-9.", file=sys.stderr)
+        return None
+
+    # --- DLX Data Structure Initialization ---
+    nodes = []
+    col_sizes = [0] * NUM_CONSTRAINTS
+    header_node_indices = [-1] * NUM_CONSTRAINTS
+    row_starts = {}
+
+    # --- Build DLX Matrix ---
+
+    # 1. Create Root Node (at index ROOT_IDX = 0)
+    # Root node points to itself initially. CH points to self, RID is 0.
+    nodes.append([ROOT_IDX, ROOT_IDX, ROOT_IDX, ROOT_IDX, ROOT_IDX, 0])
+
+    # 2. Create Column Header Nodes
+    for j in range(NUM_CONSTRAINTS):
+        # Header node links horizontally between root and other headers.
+        # Vertically (U/D) points to itself initially. CH points to self.
+        # RID is negative column index (-1 to -324) for identification.
+        last_header_idx = nodes[ROOT_IDX][L] # Get index of node currently left of root
+        h_idx = len(nodes)                   # Index for the new header node
+        header_node_indices[j] = h_idx
+        # Add node: [L=last_header, R=root, U=self, D=self, CH=self, RID=-(j+1)]
+        nodes.append([last_header_idx, ROOT_IDX, h_idx, h_idx, h_idx, -(j + 1)])
+        # Update horizontal links: Root <-> New Header <-> Last Header
+        nodes[last_header_idx][R] = h_idx    # Previous node's R points to new header
+        nodes[ROOT_IDX][L] = h_idx           # Root's L points to new header
+
+    # 3. Create Choice Nodes (representing placing digit d in cell r,c)
+    for r in range(N):
+        for c in range(N):
+            box_idx = (r // 3) * 3 + (c // 3)
+            for digit in range(1, N + 1):
+                d_idx = digit - 1 # 0-8 index for digit
+                row_id = (r, c, digit)
+
+                # Calculate the 4 constraint column indices this choice satisfies
+                cell_col = r * N + c
+                row_col = N_SQ + r * N + d_idx
+                col_col = N_SQ * 2 + c * N + d_idx
+                box_col = N_SQ * 3 + box_idx * N + d_idx
+                col_indices = [cell_col, row_col, col_col, box_col]
+
+                first_node_in_row_idx = -1
+                prev_node_in_row_idx = -1
+
+                # Create a node for each of the 4 constraints satisfied
+                for col_idx in col_indices:
+                    header_idx = header_node_indices[col_idx]
+                    up_node_idx = nodes[header_idx][U] # Node currently above header
+
+                    # Create new node
+                    new_node_idx = len(nodes)
+                    # Add node: [L=?, R=?, U=up_node, D=header, CH=header, RID=row_id]
+                    nodes.append([-1, -1, up_node_idx, header_idx, header_idx, row_id])
+
+                    # Link vertically within the column
+                    nodes[up_node_idx][D] = new_node_idx # Old Up's Down points to New
+                    nodes[header_idx][U] = new_node_idx  # Header's Up points to New
+                    col_sizes[col_idx] += 1              # Increment column size
+
+                    # Link horizontally within the row (circularly)
+                    if first_node_in_row_idx == -1:
+                        first_node_in_row_idx = new_node_idx
+                        nodes[new_node_idx][L] = new_node_idx # Points to self initially
+                        nodes[new_node_idx][R] = new_node_idx
+                    else:
+                        # Link New <-> Prev and New <-> First
+                        nodes[new_node_idx][L] = prev_node_in_row_idx
+                        nodes[new_node_idx][R] = first_node_in_row_idx
+                        nodes[prev_node_in_row_idx][R] = new_node_idx
+                        nodes[first_node_in_row_idx][L] = new_node_idx
+
+                    prev_node_in_row_idx = new_node_idx
+
+                # Store the index of one node from this row for easy lookup later
+                if first_node_in_row_idx != -1:
+                    row_starts[row_id] = first_node_in_row_idx
+
+    # --- Cover/Uncover Operations ---
+    def cover(header_idx):
+        """Removes a column (header) and all rows intersecting it."""
+        # Remove header from horizontal list
+        header_l_idx = nodes[header_idx][L]
+        header_r_idx = nodes[header_idx][R]
+        nodes[header_l_idx][R] = header_r_idx
+        nodes[header_r_idx][L] = header_l_idx
+
+        # Iterate down the column, removing rows associated with this column
+        row_node_idx = nodes[header_idx][D] # Start from node below header
+        while row_node_idx != header_idx:
+            # Iterate right through the row (nodes in other columns)
+            node_in_row_idx = nodes[row_node_idx][R]
+            while node_in_row_idx != row_node_idx:
+                # Remove node from its column's vertical list
+                node_u_idx, node_d_idx = nodes[node_in_row_idx][U], nodes[node_in_row_idx][D]
+                node_c_hdr_idx = nodes[node_in_row_idx][CH] # Header index of the *other* column
+                col_idx_to_decrement = -nodes[node_c_hdr_idx][RID] - 1 # Get col index (0-323)
+
+                nodes[node_u_idx][D] = node_d_idx
+                nodes[node_d_idx][U] = node_u_idx
+                # Decrement size of the column this node belongs to
+                if 0 <= col_idx_to_decrement < NUM_CONSTRAINTS:
+                     col_sizes[col_idx_to_decrement] -= 1
+
+                node_in_row_idx = nodes[node_in_row_idx][R] # Move right
+            row_node_idx = nodes[row_node_idx][D] # Move down the original column
+
+    def uncover(header_idx):
+        """Restores a column (header) and all rows intersecting it."""
+        # Iterate up the column (reverse order of cover), restoring rows
+        row_node_idx = nodes[header_idx][U] # Start from node above header
+        while row_node_idx != header_idx:
+            # Iterate left through the row
+            node_in_row_idx = nodes[row_node_idx][L]
+            while node_in_row_idx != row_node_idx:
+                 # Restore node to its column's vertical list
+                node_u_idx, node_d_idx = nodes[node_in_row_idx][U], nodes[node_in_row_idx][D]
+                node_c_hdr_idx = nodes[node_in_row_idx][CH]
+                col_idx_to_increment = -nodes[node_c_hdr_idx][RID] - 1
+
+                # Increment size of the column this node belongs to
+                if 0 <= col_idx_to_increment < NUM_CONSTRAINTS:
+                    col_sizes[col_idx_to_increment] += 1
+                # Relink vertically
+                nodes[node_u_idx][D] = node_in_row_idx
+                nodes[node_d_idx][U] = node_in_row_idx
+
+                node_in_row_idx = nodes[node_in_row_idx][L] # Move left
+            row_node_idx = nodes[row_node_idx][U] # Move up the original column
+
+        # Restore header to horizontal list
+        header_l_idx = nodes[header_idx][L]
+        header_r_idx = nodes[header_idx][R]
+        nodes[header_l_idx][R] = header_idx
+        nodes[header_r_idx][L] = header_idx
+
+    # --- Handle Initial Grid Values ---
+    # 1. Basic Sudoku Rule Check on Initial Grid
+    processed_cells = set()
+    processed_row_digits = set()
+    processed_col_digits = set()
+    processed_box_digits = set()
+    initial_choice_nodes = [] # Store node indices representing initial choices
+
+    for r in range(N):
+        for c in range(N):
+            digit = int(grid[r, c])
+            if digit != 0:
+                box_idx = (r // 3) * 3 + (c // 3)
+                # Check for immediate conflicts
+                if ( (r, c) in processed_cells or
+                     (r, digit) in processed_row_digits or
+                     (c, digit) in processed_col_digits or
+                     (box_idx, digit) in processed_box_digits ):
+                    print(f"Error: Initial grid violates Sudoku rules at ({r},{c}) value {digit}.", file=sys.stderr)
+                    return None
+                processed_cells.add((r,c))
+                processed_row_digits.add((r, digit))
+                processed_col_digits.add((c, digit))
+                processed_box_digits.add((box_idx, digit))
+
+                # Find the DLX row node corresponding to this initial value
+                row_id = (r, c, digit)
+                if row_id in row_starts:
+                    initial_choice_nodes.append(row_starts[row_id])
+                else:
+                    print(f"Internal Error: Could not find DLX row for initial value {digit} at ({r},{c}).", file=sys.stderr)
+                    return None
+
+    # 2. Cover columns corresponding to initial values (effectively selecting these rows)
+    try:
+        for row_node_idx in initial_choice_nodes:
+            # Cover the column header for the first node found for this choice
+            cover(nodes[row_node_idx][CH])
+            # Cover the column headers for all other nodes in the same row
+            node_in_row_idx = nodes[row_node_idx][R]
+            while node_in_row_idx != row_node_idx:
+                 cover(nodes[node_in_row_idx][CH])
+                 node_in_row_idx = nodes[node_in_row_idx][R]
+    except Exception as e:
+        print(f"Error during initial grid processing cover operation: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        return None
+
+    # --- Search Algorithm (Recursive Backtracking) ---
+    solution_found = False
+    final_solution_node_indices = [] # Stores indices of nodes in the final solution rows
+    current_solution_node_indices = [] # Stores indices during recursive search
+
+    def search():
+        nonlocal solution_found, final_solution_node_indices
+        if solution_found: return True # Stop searching once a solution is found
+
+        # Base case: Header list is empty (root's right pointer points back to root)
+        if nodes[ROOT_IDX][R] == ROOT_IDX:
+            solution_found = True
+            # Combine initial choices with recursively found choices
+            final_solution_node_indices = initial_choice_nodes + list(current_solution_node_indices)
+            return True
+
+        # Choose column C with minimum size (S-heuristic)
+        chosen_header_idx = -1
+        min_size = float('inf')
+        current_header_idx = nodes[ROOT_IDX][R] # Start from root's right
+        while current_header_idx != ROOT_IDX:   # Iterate until back to root
+            col_idx = -nodes[current_header_idx][RID] - 1 # Get col index (0-323)
+            size = col_sizes[col_idx]
+            if size < min_size:
+                min_size = size
+                chosen_header_idx = current_header_idx
+            if min_size <= 1: break # Optimization: Cannot get smaller
+            current_header_idx = nodes[current_header_idx][R] # Move to next header
+
+        # If min_size is 0, this path is unsatisfiable -> backtrack
+        if min_size == 0:
+             return False
+        # Should not happen if root.R != root, but as safeguard:
+        if chosen_header_idx == -1:
+             print("Error: No column chosen, but matrix not empty.", file=sys.stderr)
+             return False
+
+        # Cover the chosen column
+        cover(chosen_header_idx)
+
+        # Iterate through rows R intersecting the chosen column C
+        row_node_idx = nodes[chosen_header_idx][D] # Down from header
+        while row_node_idx != chosen_header_idx:
+            # Tentatively add this row to the partial solution
+            current_solution_node_indices.append(row_node_idx)
+
+            # Cover columns J linked by other nodes in row R
+            node_in_row_idx = nodes[row_node_idx][R] # Right from current node
+            while node_in_row_idx != row_node_idx:
+                cover(nodes[node_in_row_idx][CH]) # Cover the header of the column node_in_row is in
+                node_in_row_idx = nodes[node_in_row_idx][R]
+
+            # Recurse
+            if search():
+                return True # Solution found, propagate success
+
+            # Backtrack: Remove row R and uncover columns J
+            current_solution_node_indices.pop() # Remove R from partial solution
+            # Uncover columns J in reverse order of covering
+            node_in_row_idx = nodes[row_node_idx][L] # Left from current node
+            while node_in_row_idx != row_node_idx:
+                uncover(nodes[node_in_row_idx][CH])
+                node_in_row_idx = nodes[node_in_row_idx][L]
+
+            row_node_idx = nodes[row_node_idx][D] # Move down to next row in column C
+
+        # If no row in C led to a solution, backtrack further
+        uncover(chosen_header_idx)
+        return False
+
+    # --- Initiate Search and Reconstruct Solution ---
+    if search():
+        # Reconstruct the grid from the solution node indices
+        solved_grid = np.zeros((N, N), dtype=int)
+        for node_idx in final_solution_node_indices:
+            row_id = nodes[node_idx][RID]
+            # Ensure it's a choice node (RID is tuple)
+            if isinstance(row_id, tuple) and len(row_id) == 3:
+                r, c, digit = row_id
+                if 0 <= r < N and 0 <= c < N and 1 <= digit <= N:
+                    if solved_grid[r, c] == 0:
+                        solved_grid[r, c] = digit
+                    elif solved_grid[r, c] != digit:
+                        # Should not happen if logic is correct and puzzle is valid
+                        print(f"Error: Conflict during solution reconstruction at ({r},{c}). "
+                              f"Tried to place {digit}, but found {solved_grid[r, c]}.", file=sys.stderr)
+                        return None
+                else:
+                     print(f"Error: Invalid row_id {row_id} found in solution node {node_idx}.", file=sys.stderr)
+                     return None
+
+        # Final check: ensure all cells are filled
+        if np.any(solved_grid == 0):
+             # This might happen if the original puzzle had no solution,
+             # but search() should have returned False in that case.
+             # If search() returned True, this indicates an internal error.
+             print("Internal Error: DLX search succeeded but solution grid still contains zeros.", file=sys.stderr)
+             return None
+
+        return solved_grid
+    else:
+        # Search failed, no solution found
+        return None
 
 def generate_writing_instructions(unsolved_board, solved_board, cell_size_mm):
     instructions = []
