@@ -39,21 +39,18 @@ def initialise_steppers():
 
 LEFT_PINS, RIGHT_PINS, STEP_SEQ, STEPS_PER_REV = initialise_steppers()
 
-DEFAULT_DELAY = 0.0015
-SPRINT_DELAY = 0.0008 # Faster! Tune this value to taste/motor capability
 
 def set_increment(pins, inc):
     for p, v in zip(pins, inc):
         p.value = v
 
 
-def move_stepper(pins, steps, forwards=True, delay=DEFAULT_DELAY):
+def move_stepper(pins, steps, forwards=True, delay=0.0015):
     seq = STEP_SEQ if forwards else STEP_SEQ[::-1]
     for i in range(steps):
         set_increment(pins, seq[i % len(seq)])
         sleep(delay)
-    # Keep coils energized between commands for holding torque? Optional.
-    # set_increment(pins, (0, 0, 0, 0)) # release coils
+    set_increment(pins, (0, 0, 0, 0))  # release coils
 
 
 def move(left_steps, right_steps, left_fwd=True, right_fwd=True):
@@ -69,15 +66,13 @@ STEP_SIZE = int(STEPS_PER_REV * 0.05)
 
 def handle(cmd: str):
     if cmd == "w":        # forward
-        move(STEP_SIZE, STEP_SIZE, True, True, delay=DEFAULT_DELAY)
+        move(STEP_SIZE, STEP_SIZE, True, True)
     elif cmd == "s":      # backward
-        move(STEP_SIZE, STEP_SIZE, False, False, delay=DEFAULT_DELAY)
+        move(STEP_SIZE, STEP_SIZE, False, False)
     elif cmd == "a":      # turn left  (left backwards, right forwards)
-        move(STEP_SIZE, STEP_SIZE, False, True, delay=DEFAULT_DELAY)
+        move(STEP_SIZE, STEP_SIZE, False, True)
     elif cmd == "d":      # turn right (left forwards, right backwards)
-        move(STEP_SIZE, STEP_SIZE, True, False, delay=DEFAULT_DELAY)
-    elif cmd == "e":      # sprint forward
-        move(STEP_SIZE, STEP_SIZE, True, True, delay=SPRINT_DELAY)
+        move(STEP_SIZE, STEP_SIZE, True, False)
     elif cmd == " ":      # stop (just de-energise)
         set_increment(LEFT_PINS, (0, 0, 0, 0))
         set_increment(RIGHT_PINS, (0, 0, 0, 0))

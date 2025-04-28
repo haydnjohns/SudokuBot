@@ -38,7 +38,7 @@ def main():
     except OSError as e:
         sys.exit(f"[Client] Connection error: {e}")
 
-    print("Controls:  w/a/s/d – drive | e – sprint | space – stop | q – quit")
+    print("Controls:  w/a/s/d – drive | space – stop | q – quit")
     try:
         while True:
             key = read_key()
@@ -47,7 +47,7 @@ def main():
 
             # Normalise to lower-case and filter allowed keys
             key = key.lower()
-            if key in ("w", "a", "s", "d", "e", " ", "q"):
+            if key in ("w", "a", "s", "d", " ", "q"):
                 sock.send(key.encode("utf-8"))
                 if key == "q":
                     break
