@@ -12,16 +12,16 @@ FINAL_CELL_SIZE = (28, 28)
 # Load trained digit classification model
 model = load_model("digit_cnn.keras")
 
-def rectify(h):
+def sort_corners(contour):
     h = h.reshape((4, 2))
-    hnew = np.zeros((4, 2), dtype=np.float32)
+    contour_sorted = np.zeros((4, 2), dtype=np.float32)
     add = h.sum(1)
-    hnew[0] = h[np.argmin(add)]
-    hnew[2] = h[np.argmax(add)]
+    contour_sorted[0] = h[np.argmin(add)]
+    contour_sorted[2] = h[np.argmax(add)]
     diff = np.diff(h, axis=1)
-    hnew[1] = h[np.argmin(diff)]
-    hnew[3] = h[np.argmax(diff)]
-    return hnew
+    contour_sorted[1] = h[np.argmin(diff)]
+    contour_sorted[3] = h[np.argmax(diff)]
+    return contour_sorted
 
 def process_board(image, target_size=RECTIFIED_GRID_SIZE):
     original_image = image.copy()
