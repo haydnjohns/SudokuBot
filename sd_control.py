@@ -38,43 +38,20 @@ def main():
     except OSError as e:
         sys.exit(f"[Client] Connection error: {e}")
 
-    print("Controls:  w/a/s/d – drive | W/A/S/D - SPRINT | space – stop | q – quit")
-    last_sent_key = ' ' # Track the last key sent, start with stop state
+    print("Controls:  w/a/s/d – drive | space – stop | q – quit")
     try:
         while True:
             key = read_key()
-
             if key is None:
-                # Key released
-                if last_sent_key in ("w", "a", "s", "d", "W", "A", "S", "D"):
-                    print("[Client] Key released, sending stop.")
-                    sock.send(" ".encode("utf-8"))
-                    last_sent_key = ' '
                 continue
 
-            # Key pressed
-            # No lower() here, case matters for sprint
-            allowed_keys = ("w", "a", "s", "d", "W", "A", "S", "D", " ", "q")
-
-            if key in allowed_keys:
-                if key == "q":
-                    sock.send(key.encode("utf-8"))
-                    break
-                if key != last_sent_key:
-                    print(f"[Client] Sending command: '{key}'")
-                    sock.send(key.encode("utf-8"))
-                    last_sent_key = key
-            # Ignore other keys silently
-
-    except Exception as e:
-        print(f"\n[Client] Error: {e}")
-    finally:
-        # Ensure stop command is sent on exit if moving
-        if last_sent_key != ' ':
-            try:
+            # Normalise to lower-case and filter allowed keys
+            key = key.lower()
+            if key in ("w", "a", "s", "d", " ", "q"):
                 sock.send(key.encode("utf-8"))
-            except Exception as e_final:
-                print(f"[Client] Error sending final stop: {e_final}")
+                if key == "q":
+                    break
+    finally:
         sock.close()
         print("\n[Client] Disconnected")
 

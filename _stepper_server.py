@@ -18,12 +18,6 @@ from time import sleep
 
 from gpiozero import OutputDevice
 
-# ────────────────────────── Global State for Movement ──────────────────────────
-
-movement_threads = [] # To keep track of active motor threads
-stop_event = threading.Event() # To signal motor threads to stop
-current_command = ' ' # Track the last movement command
-
 # ──────────────────────────  Stepper helpers  ──────────────────────────
 
 
@@ -51,77 +45,37 @@ def set_increment(pins, inc):
         p.value = v
 
 
-def _move_stepper_continuous(pins, stop_event_local, forwards=True, delay=0.0015):
-    """Worker function for continuous movement in a thread."""
+def move_stepper(pins, steps, forwards=True, delay=0.0015):
     seq = STEP_SEQ if forwards else STEP_SEQ[::-1]
-    step_index = 0
-    while not stop_event_local.is_set():
+    for i in range(steps):
         set_increment(pins, seq[i % len(seq)])
         sleep(delay)
-        step_index += 1
-    # De-energize when stopped
-    set_increment(pins, (0, 0, 0, 0))
-    print(f"[Pi] Stepper thread stopped for pins: {[p.pin for p in pins]}")
+    set_increment(pins, (0, 0, 0, 0))  # release coils
 
 
-def stop_movement():
-    """Signals all active movement threads to stop and waits for them."""
-    global movement_threads, stop_event, current_command
-    if not movement_threads:
-        # Ensure coils are de-energized even if no threads are running
-        set_increment(LEFT_PINS, (0, 0, 0, 0))
-        set_increment(RIGHT_PINS, (0, 0, 0, 0))
-        return
-
-    print("[Pi] Stopping movement...")
-    stop_event.set() # Signal threads to stop
-    for t in movement_threads:
-        t.join(timeout=0.5) # Wait briefly for threads to finish
-    movement_threads = []
-    stop_event.clear() # Reset event for next movement
-    # Explicitly de-energize after threads should have finished
-    set_increment(LEFT_PINS, (0, 0, 0, 0))
-    set_increment(RIGHT_PINS, (0, 0, 0, 0))
-    print("[Pi] Movement stopped.")
-    current_command = ' '
+def move(left_steps, right_steps, left_fwd=True, right_fwd=True):
+    lt = threading.Thread(target=move_stepper, args=(LEFT_PINS, left_steps, left_fwd))
+    rt = threading.Thread(target=move_stepper, args=(RIGHT_PINS, right_steps, right_fwd))
+    lt.start(), rt.start()
+    lt.join(), rt.join()
 
 
-def start_movement(left_fwd=True, right_fwd=True, delay=0.0015):
-    """Stops previous movement and starts new continuous movement."""
-    global movement_threads, stop_event
-    stop_movement() # Stop any existing movement first
-
-    print(f"[Pi] Starting movement: left_fwd={left_fwd}, right_fwd={right_fwd}, delay={delay}")
-    # Pass the global stop_event to each thread
-    lt = threading.Thread(target=_move_stepper_continuous, args=(LEFT_PINS, stop_event, left_fwd, delay), daemon=True)
-    rt = threading.Thread(target=_move_stepper_continuous, args=(RIGHT_PINS, stop_event, right_fwd, delay), daemon=True)
-    movement_threads = [lt, rt]
-    lt.start()
-    rt.start()
-
-
-# Define speeds
-NORMAL_DELAY = 0.0015
-SPRINT_DELAY = 0.0008 # Faster speed
+# Roughly 0.05 rev per key-press → tune to taste
+STEP_SIZE = int(STEPS_PER_REV * 0.05)
 
 
 def handle(cmd: str):
-    global current_command
-    if cmd == current_command and cmd != ' ': # Avoid restarting if command is the same
-        return
-
-    print(f"[Pi] Handling command: '{cmd}'")
-    current_command = cmd # Update current command immediately
-
-    if cmd == "w": start_movement(True, True, NORMAL_DELAY)         # forward
-    elif cmd == "s": start_movement(False, False, NORMAL_DELAY)     # backward
-    elif cmd == "a": start_movement(False, True, NORMAL_DELAY)      # turn left
-    elif cmd == "d": start_movement(True, False, NORMAL_DELAY)      # turn right
-    elif cmd == "W": start_movement(True, True, SPRINT_DELAY)       # SPRINT forward
-    elif cmd == "S": start_movement(False, False, SPRINT_DELAY)     # SPRINT backward
-    elif cmd == "A": start_movement(False, True, SPRINT_DELAY)      # SPRINT turn left
-    elif cmd == "D": start_movement(True, False, SPRINT_DELAY)      # SPRINT turn right
-    elif cmd == " ": stop_movement()                                # stop
+    if cmd == "w":        # forward
+        move(STEP_SIZE, STEP_SIZE, True, True)
+    elif cmd == "s":      # backward
+        move(STEP_SIZE, STEP_SIZE, False, False)
+    elif cmd == "a":      # turn left  (left backwards, right forwards)
+        move(STEP_SIZE, STEP_SIZE, False, True)
+    elif cmd == "d":      # turn right (left forwards, right backwards)
+        move(STEP_SIZE, STEP_SIZE, True, False)
+    elif cmd == " ":      # stop (just de-energise)
+        set_increment(LEFT_PINS, (0, 0, 0, 0))
+        set_increment(RIGHT_PINS, (0, 0, 0, 0))
 
 
 # ─────────────────────────────  Server  ────────────────────────────────
@@ -129,9 +83,8 @@ def handle(cmd: str):
 
 def cleanup(*_):
     set_increment(LEFT_PINS, (0, 0, 0, 0))
-    stop_movement() # Ensure motors are stopped and de-energized
-    print("[Pi] Cleanup complete. Exiting.")
-    sys.exit(0) # Ensure the script exits
+    set_increment(RIGHT_PINS, (0, 0, 0, 0))
+    sys.exit(0)
 
 
 for sig in (signal.SIGINT, signal.SIGTERM):
@@ -161,7 +114,7 @@ def run_server(host: str = "0.0.0.0", port: int = 9999):
                         print("[Pi] Client disconnected (received empty data)")
                         break
                     cmd = data.decode("utf-8")
-                    # print(f"[Pi] Received command: '{cmd}'") # Logging moved to handle()
+                    print(f"[Pi] Received command: '{cmd}'") # Add logging
                     if cmd == "q":
                         print("[Pi] Quit command received. Shutting down.")
                         break
