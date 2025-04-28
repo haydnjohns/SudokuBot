@@ -335,69 +335,36 @@ def print_virtual_board(board):
     # Print the bottom border after the last row
     print("+ - - - + - - - + - - - +")
 
-def solve_sudoku(grid):
-    """
-    Solves a Sudoku puzzle using backtracking.
-    Modifies the grid in-place.
-    Returns True if a solution is found, False otherwise.
-    """
-    find = find_empty(grid)
-    if not find:
-        return True  # Puzzle solved
-    else:
-        row, col = find
-
-    for num in range(1, 10):
-        if is_valid(grid, num, (row, col)):
-            grid[row][col] = num
-
-            if solve_sudoku(grid):
-                return True
-
-            # Backtrack: if solve_sudoku returned False, reset the cell
-            grid[row][col] = 0
-
-    return False # Trigger backtracking
-
-def is_valid(grid, num, pos):
-    """
-    Checks if placing 'num' at 'pos' (row, col) is valid.
-    pos: tuple (row, col)
-    """
-    row, col = pos
-
-    # Check row
-    for i in range(len(grid[0])):
-        if grid[row][i] == num and col != i:
+def solve_sudoku(board):
+    def is_valid(board, row, col, num):
+        # Check row
+        if num in board[row]:
             return False
-
-    # Check column
-    for i in range(len(grid)):
-        if grid[i][col] == num and row != i:
+        # Check column
+        if num in board[:, col]:
             return False
+        # Check 3x3 box
+        start_row, start_col = 3 * (row // 3), 3 * (col // 3)
+        if num in board[start_row:start_row+3, start_col:start_col+3]:
+            return False
+        return True
 
-    # Check 3x3 box
-    box_x = col // 3
-    box_y = row // 3
+    def solve(board):
+        for row in range(9):
+            for col in range(9):
+                if board[row, col] == 0:
+                    for num in range(1, 10):
+                        if is_valid(board, row, col, num):
+                            board[row, col] = num
+                            if solve(board):
+                                return True
+                            board[row, col] = 0
+                    return False  # No valid number found, backtrack
+        return True  # Solved!
 
-    for i in range(box_y * 3, box_y * 3 + 3):
-        for j in range(box_x * 3, box_x * 3 + 3):
-            if grid[i][j] == num and (i, j) != pos:
-                return False
-
-    return True
-
-def find_empty(grid):
-    """
-    Finds an empty cell (represented by 0) in the grid.
-    Returns (row, col) tuple or None if no empty cell is found.
-    """
-    for i in range(len(grid)):
-        for j in range(len(grid[0])):
-            if grid[i][j] == 0:
-                return (i, j)  # row, col
-    return None
-
+    board_copy = board.copy()  # Avoid modifying the original board
+    solve(board_copy)
+    return board_copy
 
 def generate_writing_instructions(unsolved_board, solved_board, cell_size_mm):
     instructions = []
