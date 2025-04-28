@@ -1,0 +1,798 @@
+local_system:
+  attached_files:
+    - runonpi.sh
+    - runonpi.py
+    - chmod +x runonpi.sh
+    - '# runonpi.sh'
+    - '# robot_server.py  (runs on the Raspberry Pi)'
+    - '# control_robot.py  (runs on your local computer)'
+  conversation_file:
+  compile_command:
+  initial_file_contents:
+    runonpi.sh: |
+      #!/bin/bash
+
+      # File to send
+      SCRIPT_NAME="runonpi.py"
+
+      # Step 1: Copy the file to the Raspberry Pi
+      scp $SCRIPT_NAME pi@raspberrypi.local:/home/pi/SudokuBot/
+
+      # Step 2: SSH into the Pi and run commands
+      ssh pi@raspberrypi.local << EOF
+          cd ~/SudokuBot
+          source venv/bin/activate
+          python "$SCRIPT_NAME"
+      EOF
+    runonpi.py: |-
+      from gpiozero import OutputDevice
+      from time import sleep
+
+      # Define GPIO pins for left stepper motor (adjust according to your setup)
+      left_stepper_pins = [OutputDevice(5), OutputDevice(6), OutputDevice(16), OutputDevice(20)]
+
+      # Define GPIO pins for right stepper motor (adjust according to your setup)
+      right_stepper_pins = [OutputDevice(14), OutputDevice(15), OutputDevice(23), OutputDevice(24)]
+
+      # Step sequence for half-stepping (8 steps for half-step)
+      step_sequence = [
+          [1, 0, 0, 0],
+          [1, 1, 0, 0],
+          [0, 1, 0, 0],
+          [0, 1, 1, 0],
+          [0, 0, 1, 0],
+          [0, 0, 1, 1],
+          [0, 0, 0, 1],
+          [1, 0, 0, 1]
+      ]
+
+      # Set stepper motor to the current step
+      def set_increment(pins, increment):
+          for pin, value in zip(pins, increment):
+              pin.value = value
+
+      # Move stepper motor forward
+      def move_stepper(pins, steps, delay):
+          for i in range(steps):
+              step = step_sequence[i % len(step_sequence)]  # Cycle through the step sequence
+              set_increment(pins, step)
+              sleep(delay)
+
+      # Move both motors forward by 1/4 turn (128 steps for each motor)
+      steps_per_revolution = 4096
+      steps_for_quarter_turn = steps_per_revolution // 4
+      delay_per_step = 0.002  # Adjust speed by changing the delay
+
+      # Move both motors
+      move_stepper(left_stepper_pins, steps_for_quarter_turn, delay_per_step)
+      move_stepper(right_stepper_pins, steps_for_quarter_turn, delay_per_step)
+    chmod +x runonpi.sh: |
+      ./runonpi.sh               # copy/launch everything on the Pi
+      python control_robot.py    # arcade-style control from your keyboard
+    '# runonpi.sh': |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      # ─── User-adjustable bits ──────────────────────────────────────────────────────
+      PI_HOST="pi@raspberrypi.local"          # the host you ssh into
+      PI_PROJ_DIR="/home/pi/SudokuBot"        # folder on the Pi
+      REMOTE_SCRIPT="robot_server.py"         # name we use on both sides
+      # ───────────────────────────────────────────────────────────────────────────────
+
+      echo "Uploading latest server code…"
+      scp "${REMOTE_SCRIPT}" "${PI_HOST}:${PI_PROJ_DIR}/"
+
+      echo "Stopping any existing server on the Pi…"
+      ssh "${PI_HOST}" "pkill -f ${REMOTE_SCRIPT} || true"
+
+      echo "Starting server inside virtual-env…"
+      ssh "${PI_HOST}" <<'SSHCMDS'
+        set -e
+        cd ~/SudokuBot
+        source venv/bin/activate
+        nohup python robot_server.py > robot_server.log 2>&1 &
+      SSHCMDS
+
+      echo "✓ Server running on Pi."
+      echo "Now run:  python control_robot.py raspberrypi.local"
+    '# robot_server.py  (runs on the Raspberry Pi)': |
+      import socket
+      import sys
+      import signal
+      from time import sleep
+      from gpiozero import OutputDevice
+
+      # ─── GPIO definitions ──────────────────────────────────────────────────────────
+      LEFT_PINS  = (5, 6, 16, 20)
+      RIGHT_PINS = (14, 15, 23, 24)
+
+      step_sequence = [
+          [1, 0, 0, 0],
+          [1, 1, 0, 0],
+          [0, 1, 0, 0],
+          [0, 1, 1, 0],
+          [0, 0, 1, 0],
+          [0, 0, 1, 1],
+          [0, 0, 0, 1],
+          [1, 0, 0, 1],
+      ]
+
+      class Stepper:
+          def __init__(self, pins):
+              self.pins = [OutputDevice(p) for p in pins]
+              self.pos  = 0  # index into step_sequence
+
+          def deenergise(self):
+              for p in self.pins:
+                  p.off()
+
+          def _set_step(self, idx):
+              pattern = step_sequence[idx]
+              for pin, val in zip(self.pins, pattern):
+                  pin.value = val
+
+          def step(self, direction=1, delay=0.001):
+              self.pos = (self.pos + direction) % len(step_sequence)
+              self._set_step(self.pos)
+              sleep(delay)
+
+      # ─── Movement helpers ─────────────────────────────────────────────────────────
+      left  = Stepper(LEFT_PINS)
+      right = Stepper(RIGHT_PINS)
+
+      def forward(steps=8):
+          for _ in range(steps):
+              left.step(+1)
+              right.step(+1)
+
+      def backward(steps=8):
+          for _ in range(steps):
+              left.step(-1)
+              right.step(-1)
+
+      def left_turn(steps=8):
+          for _ in range(steps):
+              left.step(-1)
+              right.step(+1)
+
+      def right_turn(steps=8):
+          for _ in range(steps):
+              left.step(+1)
+              right.step(-1)
+
+      COMMANDS = {
+          "FORWARD":  forward,
+          "BACKWARD": backward,
+          "LEFT":     left_turn,
+          "RIGHT":    right_turn,
+          "STOP":     lambda: None,
+      }
+
+      # ─── Networking & main loop ───────────────────────────────────────────────────
+      HOST = ""       # listen on all interfaces
+      PORT = 5005
+      BUFFER = 1024
+
+      sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+      sock.bind((HOST, PORT))
+      sock.settimeout(0.5)  # allows us to react to Ctrl-C
+
+      def clean_exit(*_):
+          print("Shutting down…")
+          left.deenergise()
+          right.deenergise()
+          sock.close()
+          sys.exit(0)
+
+      signal.signal(signal.SIGINT,  clean_exit)
+      signal.signal(signal.SIGTERM, clean_exit)
+
+      print(f"Robot server ready on UDP port {PORT}")
+
+      try:
+          while True:
+              try:
+                  data, _ = sock.recvfrom(BUFFER)
+              except socket.timeout:
+                  continue
+              cmd = data.decode().strip().upper()
+              if cmd == "QUIT":
+                  clean_exit()
+              action = COMMANDS.get(cmd)
+              if action:
+                  action()
+      except KeyboardInterrupt:
+          clean_exit()
+    '# control_robot.py  (runs on your local computer)': |
+      import socket
+      import sys
+      import termios
+      import tty
+      import select
+
+      PORT = 5005
+      HOST = sys.argv[1] if len(sys.argv) > 1 else "raspberrypi.local"
+
+      sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+      print("WASD to drive, q or Ctrl-C to quit")
+
+      fd = sys.stdin.fileno()
+      old_state = termios.tcgetattr(fd)
+      tty.setcbreak(fd)
+
+      def send(cmd: str):
+          sock.sendto(cmd.encode(), (HOST, PORT))
+
+      try:
+          while True:
+              rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
+              if rlist:
+                  ch = sys.stdin.read(1).lower()
+                  if   ch == "w": send("FORWARD")
+                  elif ch == "a": send("LEFT")
+                  elif ch == "s": send("BACKWARD")
+                  elif ch == "d": send("RIGHT")
+                  elif ch == "q" or ord(ch) in (3, 4):   # q, Ctrl-C, Ctrl-D
+                      send("QUIT")
+                      break
+      finally:
+          termios.tcsetattr(fd, termios.TCSADRAIN, old_state)
+          print("\nSession ended")
+          sock.close()
+  prev_file_contents:
+    runonpi.sh: |
+      #!/bin/bash
+
+      # File to send
+      SCRIPT_NAME="runonpi.py"
+
+      # Step 1: Copy the file to the Raspberry Pi
+      scp $SCRIPT_NAME pi@raspberrypi.local:/home/pi/SudokuBot/
+
+      # Step 2: SSH into the Pi and run commands
+      ssh pi@raspberrypi.local << EOF
+          cd ~/SudokuBot
+          source venv/bin/activate
+          python "$SCRIPT_NAME"
+      EOF
+    runonpi.py: |-
+      from gpiozero import OutputDevice
+      from time import sleep
+
+      # Define GPIO pins for left stepper motor (adjust according to your setup)
+      left_stepper_pins = [OutputDevice(5), OutputDevice(6), OutputDevice(16), OutputDevice(20)]
+
+      # Define GPIO pins for right stepper motor (adjust according to your setup)
+      right_stepper_pins = [OutputDevice(14), OutputDevice(15), OutputDevice(23), OutputDevice(24)]
+
+      # Step sequence for half-stepping (8 steps for half-step)
+      step_sequence = [
+          [1, 0, 0, 0],
+          [1, 1, 0, 0],
+          [0, 1, 0, 0],
+          [0, 1, 1, 0],
+          [0, 0, 1, 0],
+          [0, 0, 1, 1],
+          [0, 0, 0, 1],
+          [1, 0, 0, 1]
+      ]
+
+      # Set stepper motor to the current step
+      def set_increment(pins, increment):
+          for pin, value in zip(pins, increment):
+              pin.value = value
+
+      # Move stepper motor forward
+      def move_stepper(pins, steps, delay):
+          for i in range(steps):
+              step = step_sequence[i % len(step_sequence)]  # Cycle through the step sequence
+              set_increment(pins, step)
+              sleep(delay)
+
+      # Move both motors forward by 1/4 turn (128 steps for each motor)
+      steps_per_revolution = 4096
+      steps_for_quarter_turn = steps_per_revolution // 4
+      delay_per_step = 0.002  # Adjust speed by changing the delay
+
+      # Move both motors
+      move_stepper(left_stepper_pins, steps_for_quarter_turn, delay_per_step)
+      move_stepper(right_stepper_pins, steps_for_quarter_turn, delay_per_step)
+    chmod +x runonpi.sh: |
+      ./runonpi.sh               # copy/launch everything on the Pi
+      python control_robot.py    # arcade-style control from your keyboard
+    '# runonpi.sh': |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      # ─── User-adjustable bits ──────────────────────────────────────────────────────
+      PI_HOST="pi@raspberrypi.local"          # the host you ssh into
+      PI_PROJ_DIR="/home/pi/SudokuBot"        # folder on the Pi
+      REMOTE_SCRIPT="robot_server.py"         # name we use on both sides
+      # ───────────────────────────────────────────────────────────────────────────────
+
+      echo "Uploading latest server code…"
+      scp "${REMOTE_SCRIPT}" "${PI_HOST}:${PI_PROJ_DIR}/"
+
+      echo "Stopping any existing server on the Pi…"
+      ssh "${PI_HOST}" "pkill -f ${REMOTE_SCRIPT} || true"
+
+      echo "Starting server inside virtual-env…"
+      ssh "${PI_HOST}" <<'SSHCMDS'
+        set -e
+        cd ~/SudokuBot
+        source venv/bin/activate
+        nohup python robot_server.py > robot_server.log 2>&1 &
+      SSHCMDS
+
+      echo "✓ Server running on Pi."
+      echo "Now run:  python control_robot.py raspberrypi.local"
+    '# robot_server.py  (runs on the Raspberry Pi)': |
+      import socket
+      import sys
+      import signal
+      from time import sleep
+      from gpiozero import OutputDevice
+
+      # ─── GPIO definitions ──────────────────────────────────────────────────────────
+      LEFT_PINS  = (5, 6, 16, 20)
+      RIGHT_PINS = (14, 15, 23, 24)
+
+      step_sequence = [
+          [1, 0, 0, 0],
+          [1, 1, 0, 0],
+          [0, 1, 0, 0],
+          [0, 1, 1, 0],
+          [0, 0, 1, 0],
+          [0, 0, 1, 1],
+          [0, 0, 0, 1],
+          [1, 0, 0, 1],
+      ]
+
+      class Stepper:
+          def __init__(self, pins):
+              self.pins = [OutputDevice(p) for p in pins]
+              self.pos  = 0  # index into step_sequence
+
+          def deenergise(self):
+              for p in self.pins:
+                  p.off()
+
+          def _set_step(self, idx):
+              pattern = step_sequence[idx]
+              for pin, val in zip(self.pins, pattern):
+                  pin.value = val
+
+          def step(self, direction=1, delay=0.001):
+              self.pos = (self.pos + direction) % len(step_sequence)
+              self._set_step(self.pos)
+              sleep(delay)
+
+      # ─── Movement helpers ─────────────────────────────────────────────────────────
+      left  = Stepper(LEFT_PINS)
+      right = Stepper(RIGHT_PINS)
+
+      def forward(steps=8):
+          for _ in range(steps):
+              left.step(+1)
+              right.step(+1)
+
+      def backward(steps=8):
+          for _ in range(steps):
+              left.step(-1)
+              right.step(-1)
+
+      def left_turn(steps=8):
+          for _ in range(steps):
+              left.step(-1)
+              right.step(+1)
+
+      def right_turn(steps=8):
+          for _ in range(steps):
+              left.step(+1)
+              right.step(-1)
+
+      COMMANDS = {
+          "FORWARD":  forward,
+          "BACKWARD": backward,
+          "LEFT":     left_turn,
+          "RIGHT":    right_turn,
+          "STOP":     lambda: None,
+      }
+
+      # ─── Networking & main loop ───────────────────────────────────────────────────
+      HOST = ""       # listen on all interfaces
+      PORT = 5005
+      BUFFER = 1024
+
+      sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+      sock.bind((HOST, PORT))
+      sock.settimeout(0.5)  # allows us to react to Ctrl-C
+
+      def clean_exit(*_):
+          print("Shutting down…")
+          left.deenergise()
+          right.deenergise()
+          sock.close()
+          sys.exit(0)
+
+      signal.signal(signal.SIGINT,  clean_exit)
+      signal.signal(signal.SIGTERM, clean_exit)
+
+      print(f"Robot server ready on UDP port {PORT}")
+
+      try:
+          while True:
+              try:
+                  data, _ = sock.recvfrom(BUFFER)
+              except socket.timeout:
+                  continue
+              cmd = data.decode().strip().upper()
+              if cmd == "QUIT":
+                  clean_exit()
+              action = COMMANDS.get(cmd)
+              if action:
+                  action()
+      except KeyboardInterrupt:
+          clean_exit()
+    '# control_robot.py  (runs on your local computer)': |
+      import socket
+      import sys
+      import termios
+      import tty
+      import select
+
+      PORT = 5005
+      HOST = sys.argv[1] if len(sys.argv) > 1 else "raspberrypi.local"
+
+      sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+      print("WASD to drive, q or Ctrl-C to quit")
+
+      fd = sys.stdin.fileno()
+      old_state = termios.tcgetattr(fd)
+      tty.setcbreak(fd)
+
+      def send(cmd: str):
+          sock.sendto(cmd.encode(), (HOST, PORT))
+
+      try:
+          while True:
+              rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
+              if rlist:
+                  ch = sys.stdin.read(1).lower()
+                  if   ch == "w": send("FORWARD")
+                  elif ch == "a": send("LEFT")
+                  elif ch == "s": send("BACKWARD")
+                  elif ch == "d": send("RIGHT")
+                  elif ch == "q" or ord(ch) in (3, 4):   # q, Ctrl-C, Ctrl-D
+                      send("QUIT")
+                      break
+      finally:
+          termios.tcsetattr(fd, termios.TCSADRAIN, old_state)
+          print("\nSession ended")
+          sock.close()
+  diffs_applied_this_send: true
+system:
+  message: |2
+
+    You are a helpful assistant.
+    Respond in markdown format.
+    Respond with the full code for any modified or added files. No placeholders.
+    A git diff uses "+" or "-" at the start lines. Do NOT use "+" or "-" at the start of any line (unless incidental and not part of a git diff).
+    Avoid asking the user to clear their caches or do local configuration related stuff. That's rarely the cause of errors.
+    If you ask them, and they reply with a compilation error, assume they've already done everything you suggested and move on.
+    But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
+    Try to actually fix the error instead.
+  model:
+    - o3
+  code_completion_model:
+    - gemini/gemini-2.0-flash-thinking-exp-01-21
+  commit_message_model:
+    - gemini/gemini-2.0-flash-thinking-exp-01-21
+  max_completion_tokens:
+  temperature: 0.0
+  apply_mode: simple
+messages:
+  - user: |-
+      ```shell 'runonpi.sh'
+      #!/bin/bash
+
+      # File to send
+      SCRIPT_NAME="runonpi.py"
+
+      # Step 1: Copy the file to the Raspberry Pi
+      scp $SCRIPT_NAME pi@raspberrypi.local:/home/pi/SudokuBot/
+
+      # Step 2: SSH into the Pi and run commands
+      ssh pi@raspberrypi.local << EOF
+          cd ~/SudokuBot
+          source venv/bin/activate
+          python "$SCRIPT_NAME"
+      EOF
+
+      ```
+    metadata:
+      filename: runonpi.sh
+  - user: |-
+      ```python 'runonpi.py'
+      from gpiozero import OutputDevice
+      from time import sleep
+
+      # Define GPIO pins for left stepper motor (adjust according to your setup)
+      left_stepper_pins = [OutputDevice(5), OutputDevice(6), OutputDevice(16), OutputDevice(20)]
+
+      # Define GPIO pins for right stepper motor (adjust according to your setup)
+      right_stepper_pins = [OutputDevice(14), OutputDevice(15), OutputDevice(23), OutputDevice(24)]
+
+      # Step sequence for half-stepping (8 steps for half-step)
+      step_sequence = [
+          [1, 0, 0, 0],
+          [1, 1, 0, 0],
+          [0, 1, 0, 0],
+          [0, 1, 1, 0],
+          [0, 0, 1, 0],
+          [0, 0, 1, 1],
+          [0, 0, 0, 1],
+          [1, 0, 0, 1]
+      ]
+
+      # Set stepper motor to the current step
+      def set_increment(pins, increment):
+          for pin, value in zip(pins, increment):
+              pin.value = value
+
+      # Move stepper motor forward
+      def move_stepper(pins, steps, delay):
+          for i in range(steps):
+              step = step_sequence[i % len(step_sequence)]  # Cycle through the step sequence
+              set_increment(pins, step)
+              sleep(delay)
+
+      # Move both motors forward by 1/4 turn (128 steps for each motor)
+      steps_per_revolution = 4096
+      steps_for_quarter_turn = steps_per_revolution // 4
+      delay_per_step = 0.002  # Adjust speed by changing the delay
+
+      # Move both motors
+      move_stepper(left_stepper_pins, steps_for_quarter_turn, delay_per_step)
+      move_stepper(right_stepper_pins, steps_for_quarter_turn, delay_per_step)
+      ```
+    metadata:
+      filename: runonpi.py
+  - user: |-
+      Turn this into something that lets me control my robot like a videogame, ie with WASD. It should handle everything, including transferring the file and starting anything necessary on the remote pi, terminating any existing process that could interfere, etc.
+      ie I should be able to control it via my local machine, starting it from my local machine.
+    metadata:
+  - assistant: |-
+      Below are three self-contained files that give you simple “W A S D” control of the two steppers from your **local** computer.
+
+      1. `runonpi.sh` – deploys the server to the Pi, kills any previous copy and starts a fresh one inside the virtual-env.
+      2. `robot_server.py` – runs **on the Pi**, listens for tiny UDP packets and moves the motors.
+      3. `control_robot.py` – runs **on your desktop/laptop**, puts the terminal in raw mode and fires the packets whenever you press a key.
+
+      Once the three files are in the same folder on your local machine you can do
+
+      ```bash
+      chmod +x runonpi.sh
+      ./runonpi.sh               # copy/launch everything on the Pi
+      python control_robot.py    # arcade-style control from your keyboard
+      ```
+
+      When you are done just hit `q` (or `Ctrl-C`) in the control window; that also tells the Pi server to shut down cleanly.
+
+      ---
+
+      ```shell
+      # runonpi.sh
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      # ─── User-adjustable bits ──────────────────────────────────────────────────────
+      PI_HOST="pi@raspberrypi.local"          # the host you ssh into
+      PI_PROJ_DIR="/home/pi/SudokuBot"        # folder on the Pi
+      REMOTE_SCRIPT="robot_server.py"         # name we use on both sides
+      # ───────────────────────────────────────────────────────────────────────────────
+
+      echo "Uploading latest server code…"
+      scp "${REMOTE_SCRIPT}" "${PI_HOST}:${PI_PROJ_DIR}/"
+
+      echo "Stopping any existing server on the Pi…"
+      ssh "${PI_HOST}" "pkill -f ${REMOTE_SCRIPT} || true"
+
+      echo "Starting server inside virtual-env…"
+      ssh "${PI_HOST}" <<'SSHCMDS'
+        set -e
+        cd ~/SudokuBot
+        source venv/bin/activate
+        nohup python robot_server.py > robot_server.log 2>&1 &
+      SSHCMDS
+
+      echo "✓ Server running on Pi."
+      echo "Now run:  python control_robot.py raspberrypi.local"
+      ```
+
+      ---
+
+      ```python
+      # robot_server.py  (runs on the Raspberry Pi)
+      import socket
+      import sys
+      import signal
+      from time import sleep
+      from gpiozero import OutputDevice
+
+      # ─── GPIO definitions ──────────────────────────────────────────────────────────
+      LEFT_PINS  = (5, 6, 16, 20)
+      RIGHT_PINS = (14, 15, 23, 24)
+
+      step_sequence = [
+          [1, 0, 0, 0],
+          [1, 1, 0, 0],
+          [0, 1, 0, 0],
+          [0, 1, 1, 0],
+          [0, 0, 1, 0],
+          [0, 0, 1, 1],
+          [0, 0, 0, 1],
+          [1, 0, 0, 1],
+      ]
+
+      class Stepper:
+          def __init__(self, pins):
+              self.pins = [OutputDevice(p) for p in pins]
+              self.pos  = 0  # index into step_sequence
+
+          def deenergise(self):
+              for p in self.pins:
+                  p.off()
+
+          def _set_step(self, idx):
+              pattern = step_sequence[idx]
+              for pin, val in zip(self.pins, pattern):
+                  pin.value = val
+
+          def step(self, direction=1, delay=0.001):
+              self.pos = (self.pos + direction) % len(step_sequence)
+              self._set_step(self.pos)
+              sleep(delay)
+
+      # ─── Movement helpers ─────────────────────────────────────────────────────────
+      left  = Stepper(LEFT_PINS)
+      right = Stepper(RIGHT_PINS)
+
+      def forward(steps=8):
+          for _ in range(steps):
+              left.step(+1)
+              right.step(+1)
+
+      def backward(steps=8):
+          for _ in range(steps):
+              left.step(-1)
+              right.step(-1)
+
+      def left_turn(steps=8):
+          for _ in range(steps):
+              left.step(-1)
+              right.step(+1)
+
+      def right_turn(steps=8):
+          for _ in range(steps):
+              left.step(+1)
+              right.step(-1)
+
+      COMMANDS = {
+          "FORWARD":  forward,
+          "BACKWARD": backward,
+          "LEFT":     left_turn,
+          "RIGHT":    right_turn,
+          "STOP":     lambda: None,
+      }
+
+      # ─── Networking & main loop ───────────────────────────────────────────────────
+      HOST = ""       # listen on all interfaces
+      PORT = 5005
+      BUFFER = 1024
+
+      sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+      sock.bind((HOST, PORT))
+      sock.settimeout(0.5)  # allows us to react to Ctrl-C
+
+      def clean_exit(*_):
+          print("Shutting down…")
+          left.deenergise()
+          right.deenergise()
+          sock.close()
+          sys.exit(0)
+
+      signal.signal(signal.SIGINT,  clean_exit)
+      signal.signal(signal.SIGTERM, clean_exit)
+
+      print(f"Robot server ready on UDP port {PORT}")
+
+      try:
+          while True:
+              try:
+                  data, _ = sock.recvfrom(BUFFER)
+              except socket.timeout:
+                  continue
+              cmd = data.decode().strip().upper()
+              if cmd == "QUIT":
+                  clean_exit()
+              action = COMMANDS.get(cmd)
+              if action:
+                  action()
+      except KeyboardInterrupt:
+          clean_exit()
+      ```
+
+      ---
+
+      ```python
+      # control_robot.py  (runs on your local computer)
+      import socket
+      import sys
+      import termios
+      import tty
+      import select
+
+      PORT = 5005
+      HOST = sys.argv[1] if len(sys.argv) > 1 else "raspberrypi.local"
+
+      sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+      print("WASD to drive, q or Ctrl-C to quit")
+
+      fd = sys.stdin.fileno()
+      old_state = termios.tcgetattr(fd)
+      tty.setcbreak(fd)
+
+      def send(cmd: str):
+          sock.sendto(cmd.encode(), (HOST, PORT))
+
+      try:
+          while True:
+              rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
+              if rlist:
+                  ch = sys.stdin.read(1).lower()
+                  if   ch == "w": send("FORWARD")
+                  elif ch == "a": send("LEFT")
+                  elif ch == "s": send("BACKWARD")
+                  elif ch == "d": send("RIGHT")
+                  elif ch == "q" or ord(ch) in (3, 4):   # q, Ctrl-C, Ctrl-D
+                      send("QUIT")
+                      break
+      finally:
+          termios.tcsetattr(fd, termios.TCSADRAIN, old_state)
+          print("\nSession ended")
+          sock.close()
+      ```
+
+      That’s it—game-style driving with only three small scripts.  
+      Enjoy!
+    metadata:
+  - user: |
+      Identified target file 'chmod +x runonpi.sh' on fence open line 1:
+      ```bash
+      Identified target file '# runonpi.sh' on fence open line 2:
+      ```shell
+      Identified target file '# robot_server.py  (runs on the Raspberry Pi)' on fence open line 3:
+      ```python
+      Identified target file '# control_robot.py  (runs on your local computer)' on fence open line 4:
+      ```python
+      Found 4 code blocks.
+      Matching against available files:
+        1: runonpi.py
+        2: runonpi.sh
+      --- Phase 1: Processing explicit file paths in fences ---
+      Assigned block to NEW file chmod +x runonpi.sh based on explicit fence path.
+      Assigned block to NEW file # runonpi.sh based on explicit fence path.
+      Assigned block to NEW file # robot_server.py  (runs on the Raspberry Pi) based on explicit fence path.
+      Assigned block to NEW file # control_robot.py  (runs on your local computer) based on explicit fence path.
+      Remaining unassigned blocks: 0, Available files: 2
+      --- Phase 6: Applying changes to assigned files ---
+      Successfully created new file: chmod +x runonpi.sh
+      Successfully created new file: # runonpi.sh
+      Successfully created new file: # robot_server.py  (runs on the Raspberry Pi)
+      Successfully created new file: # control_robot.py  (runs on your local computer)
+    metadata:
+...
