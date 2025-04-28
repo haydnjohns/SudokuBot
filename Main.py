@@ -1,28 +1,16 @@
-import math
-import sys
-import threading  # Allows motors to run simultaneously
-import time
-from time import sleep
-
-import cv2
 import numpy as np
+import cv2
+import math
+from time import sleep
 from gpiozero import OutputDevice
 from skimage.segmentation import clear_border
-
+import threading  # Allows motors to run simultaneously
 try:
     # Try for pi
     from ai_edge_litert.interpreter import Interpreter
 except ModuleNotFoundError:
     # Fallback to full TensorFlow (for Mac / PC)
     from tensorflow.lite.python.interpreter import Interpreter
-
-# Increase recursion depth limit for potentially deep searches in complex puzzles
-try:
-    # Setting a high limit, adjust based on system capabilities and puzzle difficulty
-    sys.setrecursionlimit(3000)
-except Exception as e:
-    print(f"Warning: Could not set recursion depth limit: {e}", file=sys.stderr)
-
 
 def preprocess_image(image_path, debug=False):
     image = cv2.imread(image_path)
@@ -667,6 +655,7 @@ def solve_sudoku(grid):
         # Search failed, no solution found
         return None
 
+
 def generate_writing_instructions(unsolved_board, solved_board, cell_size_mm):
     instructions = []
 
@@ -789,7 +778,7 @@ def plan_robot_move(
         translation_rotations = translation_distance / wheel_circumference
 
         # 3. FINAL ROTATION
-        final_rotation_angle = initial_rotation_angle - heading_rad
+        final_rotation_angle = math.pi*0.5 - (initial_rotation_angle + heading_rad)
         final_rotation_rotations = (wheel_base * final_rotation_angle) / wheel_circumference
 
         # 4. MOVE SEQUENCE
@@ -823,16 +812,9 @@ def print_moves(moves, i):
         print(step_output)
 
 def initialise_steppers():
-    # Define GPIO pins for left stepper motor
     left_stepper_pins = [OutputDevice(5), OutputDevice(6), OutputDevice(16), OutputDevice(20)]
-
-    # Define GPIO pins for right stepper motor
-    right_stepper_pins = [OutputDevice(21), OutputDevice(22), OutputDevice(23), OutputDevice(24)]
-
-    # Total increments (half-steps) for one full shaft revolution (updated to 512)
-    increments_per_revolution = 512  # Based on your motor's specs
-
-    # Step sequence for half-stepping
+    right_stepper_pins = [OutputDevice(14), OutputDevice(15), OutputDevice(23), OutputDevice(24)]
+    increments_per_revolution = 4096  # your motor specs
     step_sequence = [
         [1, 0, 0, 0],
         [1, 1, 0, 0],
@@ -843,87 +825,49 @@ def initialise_steppers():
         [0, 0, 0, 1],
         [1, 0, 0, 1]
     ]
-
     return left_stepper_pins, right_stepper_pins, step_sequence, increments_per_revolution
 
 def set_increment(pins, increment):
-    """Set the stepper motor pins for the current increment (small movement)."""
     for pin, value in zip(pins, increment):
         pin.value = value
 
-def move_stepper(pins, rotations, direction, time_per_revolution):
-    """
-    Move the stepper motor a given number of rotations in a specified direction.
+def move_stepper(pins, revolutions, direction):
+    total_increments = int(abs(revolutions) * INCREMENTS_PER_REVOLUTION)
+    if total_increments == 0:
+        return
 
-    Args:
-    - pins: The GPIO pins for the stepper motor (either left or right).
-    - rotations: The number of rotations (positive for forward, negative for backward).
-    - direction: The direction of rotation ('forward' or 'backward').
-    - time_per_revolution: The time in seconds it should take for one full revolution.
-    """
-    # Calculate total increments (small movements) needed for the given rotations
-    total_increments = int(abs(rotations) * INCREMENTS_PER_REVOLUTION)
+    # Estimate reasonable delay based on some movement speed
+    delay = 0.0015  # adjust depending on your motor's capability
 
-    # Delay per increment based on time per revolution and total increments
-    delay = time_per_revolution / INCREMENTS_PER_REVOLUTION
-
-    # Select the correct sequence based on the direction
     sequence = STEP_SEQUENCE if direction == "forward" else STEP_SEQUENCE[::-1]
 
-    # Move the motor the required number of increments
     for increment in range(total_increments):
-        increment_step = sequence[increment % len(sequence)]  # Cycle through the sequence
+        increment_step = sequence[increment % len(sequence)]
         set_increment(pins, increment_step)
         sleep(delay)
 
-def move_both_steppers(left_rotations, right_rotations, left_direction, right_direction, time_per_revolution):
-    """
-    Move both stepper motors simultaneously (synchronized movement).
-
-    Args:
-    - left_rotations: The number of rotations for the left motor.
-    - right_rotations: The number of rotations for the right motor.
-    - left_direction: The direction for the left motor ('forward' or 'backward').
-    - right_direction: The direction for the right motor ('forward' or 'backward').
-    - time_per_revolution: The time in seconds it should take for one full revolution.
-    """
-    # Create threads to move both motors simultaneously
+def move_both_steppers(left_revolutions, right_revolutions, left_direction, right_direction):
     left_thread = threading.Thread(target=move_stepper,
-                                   args=(LEFT_STEPPER_PINS, left_rotations, left_direction, time_per_revolution))
+                                   args=(LEFT_STEPPER_PINS, left_revolutions, left_direction))
     right_thread = threading.Thread(target=move_stepper,
-                                    args=(RIGHT_STEPPER_PINS, right_rotations, right_direction, time_per_revolution))
+                                    args=(RIGHT_STEPPER_PINS, right_revolutions, right_direction))
 
-    # Start both threads
     left_thread.start()
     right_thread.start()
 
-    # Wait for both threads to finish before continuing
     left_thread.join()
     right_thread.join()
 
-def control_steppers(move_sequence, time_per_revolution=5):  # Adjust default time per revolution here
-    """
-    Control the stepper motors to perform a series of movements based on the move_sequence.
+def control_steppers(move_sequence):
+    for move in move_sequence:
+        distance_mm, motor, direction, revolutions = move  # ← Correct unpacking!
 
-    Args:
-    - move_sequence: List of tuples containing (rotation_angle, motor, direction, time_for_step)
-    - time_per_revolution: The time per revolution for the motor (default 5.12 seconds).
-    """
-    for i, move in enumerate(move_sequence):
-        rotation_angle, motor, direction, time_for_step = move
-
-        # Select the appropriate stepper motor
         if motor == "left":
-            pins = LEFT_STEPPER_PINS
-            move_stepper(pins, rotation_angle, direction, time_for_step)
+            move_stepper(LEFT_STEPPER_PINS, revolutions, direction)
         elif motor == "right":
-            pins = RIGHT_STEPPER_PINS
-            move_stepper(pins, rotation_angle, direction, time_for_step)
-        elif motor == "both":  # Move both motors simultaneously
-            # For both motors, we pass the same rotation angle and direction for both motors
-            move_both_steppers(rotation_angle, rotation_angle, direction, direction, time_for_step)
-
-
+            move_stepper(RIGHT_STEPPER_PINS, revolutions, direction)
+        elif motor == "both":
+            move_both_steppers(revolutions, revolutions, direction, direction)
 
 image_path = 'sudoku.png'
 eroded, original, gray = preprocess_image(image_path)
@@ -1007,7 +951,8 @@ heading_deg = robot_heading_deg
 #     [21.83, 371.11, 7]
 # ]
 
-left_stepper_pins, right_stepper_pins, step_sequence, increments_per_revolution = initialise_steppers()
+LEFT_STEPPER_PINS, RIGHT_STEPPER_PINS, STEP_SEQUENCE, INCREMENTS_PER_REVOLUTION = initialise_steppers()
+
 # Loop through instructions
 for i, instruction in enumerate(writing_instructions):
     x_target, y_target, digit = instruction
@@ -1017,7 +962,8 @@ for i, instruction in enumerate(writing_instructions):
     print_moves(robot_path, i)
 
     # CALL FUNCTION TO RUN STEPPER MOTORS
-    # control_steppers(robot_path)
+    control_steppers(robot_path)
+    sleep(0.1)
     # CALL FUNCTION TO SELECT DIGIT
     # CALL FUNCTION TO STAMP DIGIT
 
