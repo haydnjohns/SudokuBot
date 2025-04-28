@@ -1,41 +1,72 @@
-from gpiozero import OutputDevice
+import threading
 from time import sleep
+from gpiozero import OutputDevice
 
-# Define GPIO pins for left stepper motor (adjust according to your setup)
-left_stepper_pins = [OutputDevice(5), OutputDevice(6), OutputDevice(16), OutputDevice(20)]
+def initialise_steppers():
+    left_stepper_pins = [OutputDevice(5), OutputDevice(6), OutputDevice(16), OutputDevice(20)]
+    right_stepper_pins = [OutputDevice(14), OutputDevice(15), OutputDevice(23), OutputDevice(24)]
+    increments_per_revolution = 4096  # your motor specs
+    step_sequence = [
+        [1, 0, 0, 0],
+        [1, 1, 0, 0],
+        [0, 1, 0, 0],
+        [0, 1, 1, 0],
+        [0, 0, 1, 0],
+        [0, 0, 1, 1],
+        [0, 0, 0, 1],
+        [1, 0, 0, 1]
+    ]
+    return left_stepper_pins, right_stepper_pins, step_sequence, increments_per_revolution
 
-# Define GPIO pins for right stepper motor (adjust according to your setup)
-right_stepper_pins = [OutputDevice(15), OutputDevice(16), OutputDevice(23), OutputDevice(24)]
+LEFT_STEPPER_PINS, RIGHT_STEPPER_PINS, STEP_SEQUENCE, INCREMENTS_PER_REVOLUTION = initialise_steppers()
 
-# Step sequence for half-stepping (8 steps for half-step)
-step_sequence = [
-    [1, 0, 0, 0],
-    [1, 1, 0, 0],
-    [0, 1, 0, 0],
-    [0, 1, 1, 0],
-    [0, 0, 1, 0],
-    [0, 0, 1, 1],
-    [0, 0, 0, 1],
-    [1, 0, 0, 1]
-]
-
-# Set stepper motor to the current step
 def set_increment(pins, increment):
     for pin, value in zip(pins, increment):
         pin.value = value
 
-# Move stepper motor forward
-def move_stepper(pins, steps, delay):
-    for i in range(steps):
-        step = step_sequence[i % len(step_sequence)]  # Cycle through the step sequence
-        set_increment(pins, step)
+def move_stepper(pins, revolutions, direction):
+    total_increments = int(abs(revolutions) * INCREMENTS_PER_REVOLUTION)
+    if total_increments == 0:
+        return
+
+    # Estimate reasonable delay based on some movement speed
+    delay = 0.0015  # adjust depending on your motor's capability
+
+    sequence = STEP_SEQUENCE if direction == "forward" else STEP_SEQUENCE[::-1]
+
+    for increment in range(total_increments):
+        increment_step = sequence[increment % len(sequence)]
+        set_increment(pins, increment_step)
         sleep(delay)
 
-# Move both motors forward by 1/4 turn (128 steps for each motor)
-steps_per_revolution = 512
-steps_for_quarter_turn = steps_per_revolution // 4
-delay_per_step = 0.02  # Adjust speed by changing the delay
+def move_both_steppers(left_revolutions, right_revolutions, left_direction, right_direction):
+    left_thread = threading.Thread(target=move_stepper,
+                                   args=(LEFT_STEPPER_PINS, left_revolutions, left_direction))
+    right_thread = threading.Thread(target=move_stepper,
+                                    args=(RIGHT_STEPPER_PINS, right_revolutions, right_direction))
 
-# Move both motors
-move_stepper(left_stepper_pins, steps_for_quarter_turn, delay_per_step)
-move_stepper(right_stepper_pins, steps_for_quarter_turn, delay_per_step)
+    left_thread.start()
+    right_thread.start()
+
+    left_thread.join()
+    right_thread.join()
+
+def control_steppers(move_sequence):
+    for move in move_sequence:
+        distance_mm, motor, direction, revolutions = move  # ← Correct unpacking!
+
+        if motor == "left":
+            move_stepper(LEFT_STEPPER_PINS, revolutions, direction)
+        elif motor == "right":
+            move_stepper(RIGHT_STEPPER_PINS, revolutions, direction)
+        elif motor == "both":
+            move_both_steppers(revolutions, revolutions, direction, direction)
+
+# Example path
+robot_path = [
+    (0.24997130421432334, 'left', 'forward', 0.14515845335332597),
+    (364.802382736357, 'both', 'forward', 3.1383839169833903),
+    (0.38596877466992846, 'left', 'forward', 0.22413224809887947)
+]
+
+control_steppers(robot_path)
