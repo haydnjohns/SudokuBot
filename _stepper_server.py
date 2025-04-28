@@ -92,22 +92,41 @@ for sig in (signal.SIGINT, signal.SIGTERM):
 
 
 def run_server(host: str = "0.0.0.0", port: int = 9999):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind((host, port))
         s.listen(1)
         print(f"[Pi] Listening on {host}:{port}")
+    except OSError as e:
+        print(f"[Pi] Error binding to {host}:{port} - {e}", file=sys.stderr)
+        sys.exit(1) # Exit if binding fails
+
+    # Use the created socket 's'
+    with s:
         conn, addr = s.accept()
         print(f"[Pi] Client {addr} connected")
         with conn:
             while True:
-                data = conn.recv(1)
-                if not data:
+                try:
+                    data = conn.recv(1)
+                    if not data:
+                        print("[Pi] Client disconnected (received empty data)")
+                        break
+                    cmd = data.decode("utf-8")
+                    print(f"[Pi] Received command: '{cmd}'") # Add logging
+                    if cmd == "q":
+                        print("[Pi] Quit command received. Shutting down.")
+                        break
+                    handle(cmd)
+                except ConnectionResetError:
+                    print("[Pi] Client connection reset.")
                     break
-                cmd = data.decode("utf-8")
-                if cmd == "q":
+                except Exception as e:
+                    print(f"[Pi] Error handling client data: {e}", file=sys.stderr)
                     break
-                handle(cmd)
+
+    print("[Pi] Server loop finished.")
     cleanup()
 
 
