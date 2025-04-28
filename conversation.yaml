@@ -3,7 +3,7 @@ local_system:
     - _stepper_server.py
     - nonpi.sh
     - sd_control.py
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     _stepper_server.py: |
@@ -101,22 +101,41 @@ local_system:
 
 
       def run_server(host: str = "0.0.0.0", port: int = 9999):
-          with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+          try:
+              s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
               s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
               s.bind((host, port))
               s.listen(1)
               print(f"[Pi] Listening on {host}:{port}")
+          except OSError as e:
+              print(f"[Pi] Error binding to {host}:{port} - {e}", file=sys.stderr)
+              sys.exit(1) # Exit if binding fails
+
+          # Use the created socket 's'
+          with s:
               conn, addr = s.accept()
               print(f"[Pi] Client {addr} connected")
               with conn:
                   while True:
-                      data = conn.recv(1)
-                      if not data:
+                      try:
+                          data = conn.recv(1)
+                          if not data:
+                              print("[Pi] Client disconnected (received empty data)")
+                              break
+                          cmd = data.decode("utf-8")
+                          print(f"[Pi] Received command: '{cmd}'") # Add logging
+                          if cmd == "q":
+                              print("[Pi] Quit command received. Shutting down.")
+                              break
+                          handle(cmd)
+                      except ConnectionResetError:
+                          print("[Pi] Client connection reset.")
                           break
-                      cmd = data.decode("utf-8")
-                      if cmd == "q":
+                      except Exception as e:
+                          print(f"[Pi] Error handling client data: {e}", file=sys.stderr)
                           break
-                      handle(cmd)
+
+          print("[Pi] Server loop finished.")
           cleanup()
 
 
@@ -142,13 +161,49 @@ local_system:
       # 2. Restart the server on the Pi (kill any previous instance) ----------------------
       echo "[2/3] (Re)starting remote server …"
       ssh "${REMOTE_HOST}" <<'SSH_CMDS'
-        set -e
+        set -e # Exit immediately if a command exits with a non-zero status.
         cd ~/SudokuBot
+        # Ensure the virtual environment exists and is activated
+        if [ ! -d "venv" ]; then
+          echo "[Pi] Error: Virtual environment 'venv' not found in ~/SudokuBot."
+          echo "[Pi] Please create it and install dependencies (e.g., gpiozero)."
+          exit 1
+        fi
         source venv/bin/activate
-        pkill -f _stepper_server.py 2>/dev/null || true
+
+        # Ensure necessary GPIO libraries are installed
+        echo "[Pi] Ensuring lgpio library is installed..."
+        pip install lgpio RPi.GPIO # Install lgpio and ensure RPi.GPIO is also present as a fallback
+        echo "[Pi] GPIO libraries checked/installed."
+
+        echo "[Pi] Stopping previous server (if any)..."
+        pkill -f _stepper_server.py || true # Allow command to fail if no process exists
+        sleep 1 # Give time for process to terminate cleanly
+
+        echo "[Pi] Starting new server in background..."
         nohup python3 _stepper_server.py > pi_stepper_server.log 2>&1 &
-        echo "[Pi] _stepper_server.py running   (log: ~/SudokuBot/pi_stepper_server.log)"
+        SERVER_PID=$!
+        sleep 2 # Give the server a moment to start up or potentially fail
+
+        # Check if the process is still running and listening on the port
+        if ps -p $SERVER_PID > /dev/null && ss -tuln | grep -q ':9999'; then
+          echo "[Pi] Server process $SERVER_PID seems to be running and listening on port 9999."
+          echo "[Pi] Log file: ~/SudokuBot/pi_stepper_server.log"
+        else
+          echo "[Pi] Error: Server process failed to start or stay running."
+          echo "[Pi] Check the log file for details: ~/SudokuBot/pi_stepper_server.log"
+          # Optional: Exit SSH session with an error if the server failed to start
+          # exit 1
+        fi
       SSH_CMDS
+
+      # Optional: Check the exit status of the SSH command if 'exit 1' was added above
+      # SSH_EXIT_STATUS=$?
+      # if [ $SSH_EXIT_STATUS -ne 0 ]; then
+      #   echo "[Error] SSH command indicated server startup failure on the Pi."
+      #   echo "        Please check the log: ssh ${REMOTE_HOST} 'cat ~/SudokuBot/pi_stepper_server.log'"
+      #   exit $SSH_EXIT_STATUS
+      # fi
 
       # 3. Launch the local WASD client ---------------------------------------------------
       echo "[3/3] Launching local client – press 'q' to quit."
@@ -312,22 +367,41 @@ local_system:
 
 
       def run_server(host: str = "0.0.0.0", port: int = 9999):
-          with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+          try:
+              s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
               s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
               s.bind((host, port))
               s.listen(1)
               print(f"[Pi] Listening on {host}:{port}")
+          except OSError as e:
+              print(f"[Pi] Error binding to {host}:{port} - {e}", file=sys.stderr)
+              sys.exit(1) # Exit if binding fails
+
+          # Use the created socket 's'
+          with s:
               conn, addr = s.accept()
               print(f"[Pi] Client {addr} connected")
               with conn:
                   while True:
-                      data = conn.recv(1)
-                      if not data:
+                      try:
+                          data = conn.recv(1)
+                          if not data:
+                              print("[Pi] Client disconnected (received empty data)")
+                              break
+                          cmd = data.decode("utf-8")
+                          print(f"[Pi] Received command: '{cmd}'") # Add logging
+                          if cmd == "q":
+                              print("[Pi] Quit command received. Shutting down.")
+                              break
+                          handle(cmd)
+                      except ConnectionResetError:
+                          print("[Pi] Client connection reset.")
                           break
-                      cmd = data.decode("utf-8")
-                      if cmd == "q":
+                      except Exception as e:
+                          print(f"[Pi] Error handling client data: {e}", file=sys.stderr)
                           break
-                      handle(cmd)
+
+          print("[Pi] Server loop finished.")
           cleanup()
 
 
@@ -353,13 +427,49 @@ local_system:
       # 2. Restart the server on the Pi (kill any previous instance) ----------------------
       echo "[2/3] (Re)starting remote server …"
       ssh "${REMOTE_HOST}" <<'SSH_CMDS'
-        set -e
+        set -e # Exit immediately if a command exits with a non-zero status.
         cd ~/SudokuBot
+        # Ensure the virtual environment exists and is activated
+        if [ ! -d "venv" ]; then
+          echo "[Pi] Error: Virtual environment 'venv' not found in ~/SudokuBot."
+          echo "[Pi] Please create it and install dependencies (e.g., gpiozero)."
+          exit 1
+        fi
         source venv/bin/activate
-        pkill -f _stepper_server.py 2>/dev/null || true
+
+        # Ensure necessary GPIO libraries are installed
+        echo "[Pi] Ensuring lgpio library is installed..."
+        pip install lgpio RPi.GPIO # Install lgpio and ensure RPi.GPIO is also present as a fallback
+        echo "[Pi] GPIO libraries checked/installed."
+
+        echo "[Pi] Stopping previous server (if any)..."
+        pkill -f _stepper_server.py || true # Allow command to fail if no process exists
+        sleep 1 # Give time for process to terminate cleanly
+
+        echo "[Pi] Starting new server in background..."
         nohup python3 _stepper_server.py > pi_stepper_server.log 2>&1 &
-        echo "[Pi] _stepper_server.py running   (log: ~/SudokuBot/pi_stepper_server.log)"
+        SERVER_PID=$!
+        sleep 2 # Give the server a moment to start up or potentially fail
+
+        # Check if the process is still running and listening on the port
+        if ps -p $SERVER_PID > /dev/null && ss -tuln | grep -q ':9999'; then
+          echo "[Pi] Server process $SERVER_PID seems to be running and listening on port 9999."
+          echo "[Pi] Log file: ~/SudokuBot/pi_stepper_server.log"
+        else
+          echo "[Pi] Error: Server process failed to start or stay running."
+          echo "[Pi] Check the log file for details: ~/SudokuBot/pi_stepper_server.log"
+          # Optional: Exit SSH session with an error if the server failed to start
+          # exit 1
+        fi
       SSH_CMDS
+
+      # Optional: Check the exit status of the SSH command if 'exit 1' was added above
+      # SSH_EXIT_STATUS=$?
+      # if [ $SSH_EXIT_STATUS -ne 0 ]; then
+      #   echo "[Error] SSH command indicated server startup failure on the Pi."
+      #   echo "        Please check the log: ssh ${REMOTE_HOST} 'cat ~/SudokuBot/pi_stepper_server.log'"
+      #   exit $SSH_EXIT_STATUS
+      # fi
 
       # 3. Launch the local WASD client ---------------------------------------------------
       echo "[3/3] Launching local client – press 'q' to quit."
@@ -440,7 +550,7 @@ system:
     But try to avoid such suggestions. It's a cop out. It's like when tech support says 'Have you tried turning it off and on again?'.
     Try to actually fix the error instead.
   model:
-    - copy-one/paste
+    - o3
   code_completion_model:
     - gemini/gemini-2.0-flash-thinking-exp-01-21
   commit_message_model:
@@ -545,22 +655,41 @@ messages:
 
 
       def run_server(host: str = "0.0.0.0", port: int = 9999):
-          with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+          try:
+              s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
               s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
               s.bind((host, port))
               s.listen(1)
               print(f"[Pi] Listening on {host}:{port}")
+          except OSError as e:
+              print(f"[Pi] Error binding to {host}:{port} - {e}", file=sys.stderr)
+              sys.exit(1) # Exit if binding fails
+
+          # Use the created socket 's'
+          with s:
               conn, addr = s.accept()
               print(f"[Pi] Client {addr} connected")
               with conn:
                   while True:
-                      data = conn.recv(1)
-                      if not data:
+                      try:
+                          data = conn.recv(1)
+                          if not data:
+                              print("[Pi] Client disconnected (received empty data)")
+                              break
+                          cmd = data.decode("utf-8")
+                          print(f"[Pi] Received command: '{cmd}'") # Add logging
+                          if cmd == "q":
+                              print("[Pi] Quit command received. Shutting down.")
+                              break
+                          handle(cmd)
+                      except ConnectionResetError:
+                          print("[Pi] Client connection reset.")
                           break
-                      cmd = data.decode("utf-8")
-                      if cmd == "q":
+                      except Exception as e:
+                          print(f"[Pi] Error handling client data: {e}", file=sys.stderr)
                           break
-                      handle(cmd)
+
+          print("[Pi] Server loop finished.")
           cleanup()
 
 
@@ -591,13 +720,49 @@ messages:
       # 2. Restart the server on the Pi (kill any previous instance) ----------------------
       echo "[2/3] (Re)starting remote server …"
       ssh "${REMOTE_HOST}" <<'SSH_CMDS'
-        set -e
+        set -e # Exit immediately if a command exits with a non-zero status.
         cd ~/SudokuBot
+        # Ensure the virtual environment exists and is activated
+        if [ ! -d "venv" ]; then
+          echo "[Pi] Error: Virtual environment 'venv' not found in ~/SudokuBot."
+          echo "[Pi] Please create it and install dependencies (e.g., gpiozero)."
+          exit 1
+        fi
         source venv/bin/activate
-        pkill -f _stepper_server.py 2>/dev/null || true
+
+        # Ensure necessary GPIO libraries are installed
+        echo "[Pi] Ensuring lgpio library is installed..."
+        pip install lgpio RPi.GPIO # Install lgpio and ensure RPi.GPIO is also present as a fallback
+        echo "[Pi] GPIO libraries checked/installed."
+
+        echo "[Pi] Stopping previous server (if any)..."
+        pkill -f _stepper_server.py || true # Allow command to fail if no process exists
+        sleep 1 # Give time for process to terminate cleanly
+
+        echo "[Pi] Starting new server in background..."
         nohup python3 _stepper_server.py > pi_stepper_server.log 2>&1 &
-        echo "[Pi] _stepper_server.py running   (log: ~/SudokuBot/pi_stepper_server.log)"
+        SERVER_PID=$!
+        sleep 2 # Give the server a moment to start up or potentially fail
+
+        # Check if the process is still running and listening on the port
+        if ps -p $SERVER_PID > /dev/null && ss -tuln | grep -q ':9999'; then
+          echo "[Pi] Server process $SERVER_PID seems to be running and listening on port 9999."
+          echo "[Pi] Log file: ~/SudokuBot/pi_stepper_server.log"
+        else
+          echo "[Pi] Error: Server process failed to start or stay running."
+          echo "[Pi] Check the log file for details: ~/SudokuBot/pi_stepper_server.log"
+          # Optional: Exit SSH session with an error if the server failed to start
+          # exit 1
+        fi
       SSH_CMDS
+
+      # Optional: Check the exit status of the SSH command if 'exit 1' was added above
+      # SSH_EXIT_STATUS=$?
+      # if [ $SSH_EXIT_STATUS -ne 0 ]; then
+      #   echo "[Error] SSH command indicated server startup failure on the Pi."
+      #   echo "        Please check the log: ssh ${REMOTE_HOST} 'cat ~/SudokuBot/pi_stepper_server.log'"
+      #   exit $SSH_EXIT_STATUS
+      # fi
 
       # 3. Launch the local WASD client ---------------------------------------------------
       echo "[3/3] Launching local client – press 'q' to quit."
@@ -675,349 +840,188 @@ messages:
     metadata:
       filename: sd_control.py
   - user: |-
-      ```
-      ./nonpi.sh
-      [1/3] Copying _stepper_server.py to pi@raspberrypi.local:/home/pi/SudokuBot
-      Warning: Permanently added 'raspberrypi.local' (ED25519) to the list of known hosts.
-      _stepper_server.py                                                                                                                              100% 3510   233.2KB/s   00:00    
-      [2/3] (Re)starting remote server …
-      Pseudo-terminal will not be allocated because stdin is not a terminal.
-      Warning: Permanently added 'raspberrypi.local' (ED25519) to the list of known hosts.
-      Linux raspberrypi 6.12.20+rpt-rpi-v8 #1 SMP PREEMPT Debian 1:6.12.20-1+rpt1~bpo12+1 (2025-03-19) aarch64
-
-      The programs included with the Debian GNU/Linux system are free software;
-      the exact distribution terms for each program are described in the
-      individual files in /usr/share/doc/*/copyright.
-
-      Debian GNU/Linux comes with ABSOLUTELY NO WARRANTY, to the extent
-      permitted by applicable law.
-      [Pi] _stepper_server.py running   (log: ~/SudokuBot/pi_stepper_server.log)
-      [3/3] Launching local client – press 'q' to quit.
-      [Client] Connecting to raspberrypi.local:9999 …
-      [Client] Connection error: [Errno 61] Connection refused
-      ```
-
-      ```
-      ls ~/.ssh
-       aimo.pem   google_compute_engine       google_compute_known_hosts   id_rsa.pub               known_hosts       known_hostsv        raspberrypi_key       ToastChat.html
-       config     google_compute_engine.pub   id_rsa                       isaac-aws-oct-2023.pem   known_hosts.old   pz-server-key.pem   raspberrypi_key.pub  
-      ```
-
-      Fix this.
+      It should be responsive, ie as soon as I release a key it stops moving. Right now it's not responsive.
+      It's still not working to stop moving. It's like every keypress a command like 'forward' is queued, and so holding W creates an enormous queue of move commands that takes a minute to clear.
     metadata:
   - assistant: |-
-      Okay, the "Connection refused" error strongly suggests that the server process (`_stepper_server.py`) on the Raspberry Pi either isn't running, crashed immediately after starting, or isn't listening on the expected port/interface.
+      Below are two independent patches that re-work the motion logic on the Pi and make the desktop client send only “state changes” (key-down / “no-key”) instead of flooding the socket with repeats.
 
-      The most likely scenario is that the server script encountered an error during startup on the Pi (perhaps related to GPIO permissions or missing dependencies) and terminated. The `nonpi.sh` script starts it in the background (`nohup ... &`) but doesn't wait to confirm it's actually running successfully before launching the client.
-
-      Let's modify `nonpi.sh` to add a small delay and a check to see if the server process is running and listening on the port after attempting to start it. We'll also add slightly more robust error handling and logging to the server script itself.
-
-      ```diff
-      --- a/nonpi.sh
-      +++ b/nonpi.sh
-      @@ -18,13 +18,26 @@
-       # 2. Restart the server on the Pi (kill any previous instance) ----------------------
-       echo "[2/3] (Re)starting remote server …"
-       ssh "${REMOTE_HOST}" <<'SSH_CMDS'
-      -  set -e
-      +  set -e # Exit immediately if a command exits with a non-zero status.
-         cd ~/SudokuBot
-      +  # Ensure the virtual environment exists and is activated
-      +  if [ ! -d "venv" ]; then
-      +    echo "[Pi] Error: Virtual environment 'venv' not found in ~/SudokuBot."
-      +    echo "[Pi] Please create it and install dependencies (e.g., gpiozero)."
-      +    exit 1
-      +  fi
-         source venv/bin/activate
-      -  pkill -f _stepper_server.py 2>/dev/null || true
-      -  nohup python3 _stepper_server.py > pi_stepper_server.log 2>&1 &
-      -  echo "[Pi] _stepper_server.py running   (log: ~/SudokuBot/pi_stepper_server.log)"
+      ```diff '_stepper_server.py'
+      @@
+       import socket
+       import signal
+       import sys
+       import threading
+       from time import sleep
+      +from typing import List
+       
+       from gpiozero import OutputDevice
+       
+       # ──────────────────────────  Stepper helpers  ──────────────────────────
+      @@
+       LEFT_PINS, RIGHT_PINS, STEP_SEQ, STEPS_PER_REV = initialise_steppers()
+       
+      +# Runtime-control primitives -------------------------------------------------
+      +#  • stop_event      – raised whenever a motion must be aborted immediately
+      +#  • active_threads  – worker threads that are currently stepping
+      +#  • threads_lock    – protects active_threads during updates
       +
-      +  echo "[Pi] Stopping previous server (if any)..."
-      +  pkill -f _stepper_server.py || true # Allow command to fail if no process exists
-      +  sleep 1 # Give time for process to terminate cleanly
+      +stop_event = threading.Event()
+      +threads_lock = threading.Lock()
+      +active_threads: List[threading.Thread] = []
       +
-      +  echo "[Pi] Starting new server in background..."
-      +  nohup python3 _stepper_server.py > pi_stepper_server.log 2>&1 &
-      +  SERVER_PID=$!
-      +  sleep 2 # Give the server a moment to start up or potentially fail
       +
-      +  # Check if the process is still running and listening on the port
-      +  if ps -p $SERVER_PID > /dev/null && ss -tuln | grep -q ':9999'; then
-      +    echo "[Pi] Server process $SERVER_PID seems to be running and listening on port 9999."
-      +    echo "[Pi] Log file: ~/SudokuBot/pi_stepper_server.log"
-      +  else
-      +    echo "[Pi] Error: Server process failed to start or stay running."
-      +    echo "[Pi] Check the log file for details: ~/SudokuBot/pi_stepper_server.log"
-      +    # Optional: Exit SSH session with an error if the server failed to start
-      +    # exit 1
-      +  fi
-       SSH_CMDS
+       def set_increment(pins, inc):
+           for p, v in zip(pins, inc):
+               p.value = v
+       
+       
+      -def move_stepper(pins, steps, forwards=True, delay=0.0015):
+      +def move_stepper(
+      +    pins,
+      +    steps: int,
+      +    forwards: bool = True,
+      +    delay: float = 0.0015,
+      +    cancel_evt: threading.Event | None = None,
+      +):
+           seq = STEP_SEQ if forwards else STEP_SEQ[::-1]
+           for i in range(steps):
+      +        if cancel_evt and cancel_evt.is_set():
+      +            break  # abort immediately
+               set_increment(pins, seq[i % len(seq)])
+               sleep(delay)
+           set_increment(pins, (0, 0, 0, 0))  # release coils
+       
+       
+      -def move(left_steps, right_steps, left_fwd=True, right_fwd=True):
+      -    lt = threading.Thread(target=move_stepper, args=(LEFT_PINS, left_steps, left_fwd))
+      -    rt = threading.Thread(target=move_stepper, args=(RIGHT_PINS, right_steps, right_fwd))
+      -    lt.start(), rt.start()
+      -    lt.join(), rt.join()
+      +def stop_motion():
+      +    """
+      +    Abort any current motion and wait for the worker threads to exit.
+      +    Idempotent – safe to call even when nothing is moving.
+      +    """
+      +    global active_threads
+      +    stop_event.set()
+      +    with threads_lock:
+      +        for t in active_threads:
+      +            t.join()
+      +        active_threads = []
+      +    stop_event.clear()
+      +    set_increment(LEFT_PINS, (0, 0, 0, 0))
+      +    set_increment(RIGHT_PINS, (0, 0, 0, 0))
       +
-      +# Optional: Check the exit status of the SSH command if 'exit 1' was added above
-      +# SSH_EXIT_STATUS=$?
-      +# if [ $SSH_EXIT_STATUS -ne 0 ]; then
-      +#   echo "[Error] SSH command indicated server startup failure on the Pi."
-      +#   echo "        Please check the log: ssh ${REMOTE_HOST} 'cat ~/SudokuBot/pi_stepper_server.log'"
-      +#   exit $SSH_EXIT_STATUS
-      +# fi
-
-       # 3. Launch the local WASD client ---------------------------------------------------
-       echo "[3/3] Launching local client – press 'q' to quit."
-
+      +
+      +def move(left_steps, right_steps, left_fwd=True, right_fwd=True):
+      +    """
+      +    Start a fresh motion after first cancelling anything that is
+      +    already in progress.
+      +    """
+      +    global active_threads
+      +    stop_motion()
+      +
+      +    lt = threading.Thread(
+      +        target=move_stepper,
+      +        args=(LEFT_PINS, left_steps, left_fwd, 0.0015, stop_event),
+      +        daemon=True,
+      +    )
+      +    rt = threading.Thread(
+      +        target=move_stepper,
+      +        args=(RIGHT_PINS, right_steps, right_fwd, 0.0015, stop_event),
+      +        daemon=True,
+      +    )
+      +
+      +    with threads_lock:
+      +        active_threads = [lt, rt]
+      +    lt.start(), rt.start()
+       
+       
+       # Roughly 0.05 rev per key-press → tune to taste
+       STEP_SIZE = int(STEPS_PER_REV * 0.05)
+      @@
+           elif cmd == "d":      # turn right (left forwards, right backwards)
+               move(STEP_SIZE, STEP_SIZE, True, False)
+           elif cmd == " ":      # stop (just de-energise)
+      -        set_increment(LEFT_PINS, (0, 0, 0, 0))
+      -        set_increment(RIGHT_PINS, (0, 0, 0, 0))
+      +        stop_motion()
+       
+       
+       # ─────────────────────────────  Server  ────────────────────────────────
+       
+       
+       def cleanup(*_):
+      -    set_increment(LEFT_PINS, (0, 0, 0, 0))
+      -    set_increment(RIGHT_PINS, (0, 0, 0, 0))
+      +    stop_motion()
+           sys.exit(0)
       ```
 
-      ```diff
-      --- a/_stepper_server.py
-      +++ b/_stepper_server.py
-      @@ -77,22 +77,37 @@
+      ```diff 'sd_control.py'
+      @@
+       import socket
+       import sys
+       import termios
+       import tty
+      +import time
        
        
-       def run_server(host: str = "0.0.0.0", port: int = 9999):
-      -    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-      +    try:
-      +        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-               s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-               s.bind((host, port))
-               s.listen(1)
-               print(f"[Pi] Listening on {host}:{port}")
-      +    except OSError as e:
-      +        print(f"[Pi] Error binding to {host}:{port} - {e}", file=sys.stderr)
-      +        sys.exit(1) # Exit if binding fails
+       def read_key(timeout: float = 0.05):
+      @@
+           print("Controls:  w/a/s/d – drive | space – stop | q – quit")
       +
-      +    # Use the created socket 's'
-      +    with s:
-               conn, addr = s.accept()
-               print(f"[Pi] Client {addr} connected")
-               with conn:
-                   while True:
-      -                data = conn.recv(1)
-      -                if not data:
-      +                try:
-      +                    data = conn.recv(1)
-      +                    if not data:
-      +                        print("[Pi] Client disconnected (received empty data)")
-      +                        break
-      +                    cmd = data.decode("utf-8")
-      +                    print(f"[Pi] Received command: '{cmd}'") # Add logging
-      +                    if cmd == "q":
-      +                        print("[Pi] Quit command received. Shutting down.")
-      +                        break
-      +                    handle(cmd)
-      +                except ConnectionResetError:
-      +                    print("[Pi] Client connection reset.")
-                           break
-      -                cmd = data.decode("utf-8")
-      -                if cmd == "q":
-      +                except Exception as e:
-      +                    print(f"[Pi] Error handling client data: {e}", file=sys.stderr)
-                           break
-      -                handle(cmd)
+      +    last_cmd = " "            # what we most recently sent
+      +    last_press_time = time.monotonic()
+      +    STOP_TIMEOUT = 0.20       # seconds without a key → send “stop”
       +
-      +    print("[Pi] Server loop finished.")
-           cleanup()
-       
-       
-
+           try:
+               while True:
+                   key = read_key()
+      -            if key is None:
+      -                continue
+      -
+      -            # Normalise to lower-case and filter allowed keys
+      -            key = key.lower()
+      -            if key in ("w", "a", "s", "d", " ", "q"):
+      -                sock.send(key.encode("utf-8"))
+      -                if key == "q":
+      -                    break
+      +            now = time.monotonic()
+      +
+      +            if key is not None:
+      +                key = key.lower()
+      +                if key in ("w", "a", "s", "d", "q"):
+      +                    if key != last_cmd:
+      +                        sock.sendall(key.encode("utf-8"))
+      +                        last_cmd = key
+      +                    last_press_time = now
+      +                    if key == "q":
+      +                        break
+      +            else:
+      +                # No key this poll – if we haven't sent a stop for a while, do so.
+      +                if last_cmd != " " and (now - last_press_time) > STOP_TIMEOUT:
+      +                    sock.sendall(b" ")
+      +                    last_cmd = " "
+           finally:
+               sock.close()
+               print("\n[Client] Disconnected")
       ```
 
-      **Explanation:**
+      Key points:
 
-      1.  **`nonpi.sh` Changes:**
-          *   Added `set -e` within the `SSH_CMDS` block to make the remote script exit if any command fails (like `cd` or `source`).
-          *   Added a check for the existence of the `venv` directory.
-          *   Added `sleep 1` after `pkill` to give the old process time to die.
-          *   Added `sleep 2` after starting the server with `nohup` to allow it a moment to initialize or fail.
-          *   Added a check using `ps -p $SERVER_PID` (to see if the process ID still exists) and `ss -tuln | grep -q ':9999'` (to see if *any* process is listening on TCP port 9999).
-          *   Prints a success or error message based on the check. If it fails, it directs you to check the log file on the Pi (`~/SudokuBot/pi_stepper_server.log`), which is the most important step if the connection still fails.
+      1. The Pi now keeps at most one pair of worker threads.  
+         – Any new command (or explicit space) first raises `stop_event`, waits for the threads to finish, then launches the next motion.  
+         – `move_stepper()` bails out immediately when `stop_event` is set, so commands are no longer queued up.
 
-      2.  **`_stepper_server.py` Changes:**
-          *   Wrapped the initial socket creation, `bind`, and `listen` calls in a `try...except` block to catch potential `OSError` exceptions (e.g., address already in use, permission denied) during startup and print a specific error.
-          *   Added logging within the `while True` loop to show received commands.
-          *   Added basic exception handling (`ConnectionResetError`, general `Exception`) within the client communication loop to prevent the server from crashing due to unexpected client behavior or errors during command handling.
-          *   Ensured `cleanup()` is called when the server loop finishes naturally (e.g., after 'q' is received) or due to an error causing a `break`.
+      2. The desktop client sends a command only when the pressed key actually changes;  
+         when no key has been pressed for 0.2 s it automatically emits a single space, ensuring the robot halts the moment you release the key.
 
-      Now, run `./nonpi.sh` again.
-
-      *   **If it connects successfully:** Great! The delay/check might have helped, or the added server logging might reveal more if issues occur later.
-      *   **If it still shows "Connection refused":** Pay close attention to the output from the SSH part of the script. It should now print whether the server *thinks* it started successfully or if it detected a failure. **Crucially, you must then SSH into the Pi and check the contents of the log file:**
-          ```bash
-          ssh pi@raspberrypi.local 'cat ~/SudokuBot/pi_stepper_server.log'
-          ```
-          The error message in that log file will likely tell you exactly why the server failed (e.g., `ImportError: No module named 'gpiozero'`, `RuntimeError: No access to /dev/gpiomem`, etc.).
+      This combination should give you the “release-to-stop” responsiveness you were after.
     metadata:
-  - user: |
+  - user: |-
       Git apply result:
-      Found 2 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: nonpi.sh
-      Applying patch to 'nonpi.sh' using custom patcher...
-      Successfully applied patch and wrote to nonpi.sh.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: _stepper_server.py
-      Applying patch to '_stepper_server.py' using custom patcher...
-      Successfully applied patch and wrote to _stepper_server.py.
-    metadata:
-  - user: |-
-      Diff of _stepper_server.py since previous turn:
-      ```diff
-      --- original version of _stepper_server.py+++ current version of _stepper_server.py@@ -92,22 +92,41 @@ 
-       
-       def run_server(host: str = "0.0.0.0", port: int = 9999):
-      -    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-      +    try:
-      +        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-               s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-               s.bind((host, port))
-               s.listen(1)
-               print(f"[Pi] Listening on {host}:{port}")
-      +    except OSError as e:
-      +        print(f"[Pi] Error binding to {host}:{port} - {e}", file=sys.stderr)
-      +        sys.exit(1) # Exit if binding fails
-      +
-      +    # Use the created socket 's'
-      +    with s:
-               conn, addr = s.accept()
-               print(f"[Pi] Client {addr} connected")
-               with conn:
-                   while True:
-      -                data = conn.recv(1)
-      -                if not data:
-      +                try:
-      +                    data = conn.recv(1)
-      +                    if not data:
-      +                        print("[Pi] Client disconnected (received empty data)")
-      +                        break
-      +                    cmd = data.decode("utf-8")
-      +                    print(f"[Pi] Received command: '{cmd}'") # Add logging
-      +                    if cmd == "q":
-      +                        print("[Pi] Quit command received. Shutting down.")
-      +                        break
-      +                    handle(cmd)
-      +                except ConnectionResetError:
-      +                    print("[Pi] Client connection reset.")
-                           break
-      -                cmd = data.decode("utf-8")
-      -                if cmd == "q":
-      +                except Exception as e:
-      +                    print(f"[Pi] Error handling client data: {e}", file=sys.stderr)
-                           break
-      -                handle(cmd)
-      +
-      +    print("[Pi] Server loop finished.")
-           cleanup()
-       
-       
-
-      ```
-    metadata:
-  - user: |-
-      Diff of nonpi.sh since previous turn:
-      ```diff
-      --- original version of nonpi.sh+++ current version of nonpi.sh@@ -17,13 +17,44 @@ # 2. Restart the server on the Pi (kill any previous instance) ----------------------
-       echo "[2/3] (Re)starting remote server …"
-       ssh "${REMOTE_HOST}" <<'SSH_CMDS'
-      -  set -e
-      +  set -e # Exit immediately if a command exits with a non-zero status.
-         cd ~/SudokuBot
-      +  # Ensure the virtual environment exists and is activated
-      +  if [ ! -d "venv" ]; then
-      +    echo "[Pi] Error: Virtual environment 'venv' not found in ~/SudokuBot."
-      +    echo "[Pi] Please create it and install dependencies (e.g., gpiozero)."
-      +    exit 1
-      +  fi
-         source venv/bin/activate
-      -  pkill -f _stepper_server.py 2>/dev/null || true
-      +
-      +  echo "[Pi] Stopping previous server (if any)..."
-      +  pkill -f _stepper_server.py || true # Allow command to fail if no process exists
-      +  sleep 1 # Give time for process to terminate cleanly
-      +
-      +  echo "[Pi] Starting new server in background..."
-         nohup python3 _stepper_server.py > pi_stepper_server.log 2>&1 &
-      -  echo "[Pi] _stepper_server.py running   (log: ~/SudokuBot/pi_stepper_server.log)"
-      +  SERVER_PID=$!
-      +  sleep 2 # Give the server a moment to start up or potentially fail
-      +
-      +  # Check if the process is still running and listening on the port
-      +  if ps -p $SERVER_PID > /dev/null && ss -tuln | grep -q ':9999'; then
-      +    echo "[Pi] Server process $SERVER_PID seems to be running and listening on port 9999."
-      +    echo "[Pi] Log file: ~/SudokuBot/pi_stepper_server.log"
-      +  else
-      +    echo "[Pi] Error: Server process failed to start or stay running."
-      +    echo "[Pi] Check the log file for details: ~/SudokuBot/pi_stepper_server.log"
-      +    # Optional: Exit SSH session with an error if the server failed to start
-      +    # exit 1
-      +  fi
-       SSH_CMDS
-      +
-      +# Optional: Check the exit status of the SSH command if 'exit 1' was added above
-      +# SSH_EXIT_STATUS=$?
-      +# if [ $SSH_EXIT_STATUS -ne 0 ]; then
-      +#   echo "[Error] SSH command indicated server startup failure on the Pi."
-      +#   echo "        Please check the log: ssh ${REMOTE_HOST} 'cat ~/SudokuBot/pi_stepper_server.log'"
-      +#   exit $SSH_EXIT_STATUS
-      +# fi
-       
-       # 3. Launch the local WASD client ---------------------------------------------------
-       echo "[3/3] Launching local client – press 'q' to quit."
-
-      ```
-    metadata:
-  - user: |-
-      Diff of sd_control.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - assistant: |-
-      Okay, the log file gives us a crucial clue:
-
-      ```
-      /home/pi/SudokuBot/venv/lib/python3.11/site-packages/gpiozero/devices.py:300: PinFactoryFallback: Falling back from lgpio: No module named 'lgpio'
-        warnings.warn(
-      ```
-
-      This means `gpiozero` tried to use the `lgpio` library to control the GPIO pins, but that library isn't installed in your virtual environment on the Pi. While `gpiozero` *tries* to fall back to other libraries (like `RPi.GPIO`), this fallback might be failing silently, or the fallback library might lack permissions.
-
-      The most direct fix is to install `lgpio` within the virtual environment on the Pi. Let's modify `nonpi.sh` to do this automatically.
-
-      We'll add a step within the SSH commands to run `pip install lgpio`.
-
-      ```diff
-      --- a/nonpi.sh
-      +++ b/nonpi.sh
-      @@ -26,6 +26,11 @@
-           exit 1
-         fi
-         source venv/bin/activate
-      +
-      +  # Ensure necessary GPIO libraries are installed
-      +  echo "[Pi] Ensuring lgpio library is installed..."
-      +  pip install lgpio RPi.GPIO # Install lgpio and ensure RPi.GPIO is also present as a fallback
-      +  echo "[Pi] GPIO libraries checked/installed."
-
-         echo "[Pi] Stopping previous server (if any)..."
-         pkill -f _stepper_server.py || true # Allow command to fail if no process exists
-
-      ```
-
-      **Explanation:**
-
-      *   We added `pip install lgpio RPi.GPIO` right after activating the virtual environment (`source venv/bin/activate`).
-      *   This ensures that the preferred `lgpio` library is available. We also explicitly add `RPi.GPIO` just in case, as it's a common fallback.
-
-      Run `./nonpi.sh` again. This should install the missing library on the Pi before attempting to start the server. If it *still* fails, check the log file (`ssh pi@raspberrypi.local 'cat ~/SudokuBot/pi_stepper_server.log'`) again for any new errors.
-    metadata:
-  - user: |
-      Git apply result:
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: nonpi.sh
-      Applying patch to 'nonpi.sh' using custom patcher...
-      Successfully applied patch and wrote to nonpi.sh.
+      No git diff blocks (```diff) found in the last assistant message.
     metadata:
 ...
