@@ -27,6 +27,11 @@ ssh "${REMOTE_HOST}" <<'SSH_CMDS'
   fi
   source venv/bin/activate
 
+  # Ensure necessary GPIO libraries are installed
+  echo "[Pi] Ensuring lgpio library is installed..."
+  pip install lgpio RPi.GPIO # Install lgpio and ensure RPi.GPIO is also present as a fallback
+  echo "[Pi] GPIO libraries checked/installed."
+
   echo "[Pi] Stopping previous server (if any)..."
   pkill -f _stepper_server.py || true # Allow command to fail if no process exists
   sleep 1 # Give time for process to terminate cleanly
