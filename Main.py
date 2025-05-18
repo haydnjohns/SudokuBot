@@ -2,6 +2,7 @@ import numpy as np
 import cv2
 import math
 from time import sleep
+from scipy.optimize import least_squares
 from gpiozero import OutputDevice
 from skimage.segmentation import clear_border
 import threading  # Allows motors to run simultaneously
@@ -74,20 +75,48 @@ def sort_corners(contour):
 def pixel_to_world_distances(contour_sorted, debug=False):
     # --- Camera and image parameters ---
     stamper_setback = 16  # mm
-    focal_length = 3.744  # mm
-    sensor_width = 3.6    # mm
-    sensor_height = 2.7   # mm
-    sensor_width_px = 2592
-    sensor_height_px = 1944
-    camera_height = 82.5  # mm
-    camera_angle = 23.45 # degrees
+    focal_length = 3.04  # mm
+    sensor_width = 3.68    # mm
+    sensor_height = 2.76   # mm
+    sensor_width_px = 3280
+    sensor_height_px = 2464
+    camera_height = 87.5  # mm
+    camera_angle = 43.73  # degrees
     camera_angle_rad = np.radians(camera_angle)
+
+    # --- Intrinsic camera matrix and distortion coefficients ---
+    camera_matrix = np.array([
+        [2650.9964176101485, 0.0, 1638.4541745042789],
+        [0.0, 2644.434621507731, 1106.6683119862594],
+        [0.0, 0.0, 1.0]],
+        dtype=np.float32
+    )
+
+    dist_coeffs = np.array([
+        0.19930490026457645,
+        -0.2903695599399088,
+        -0.007406225233953261,
+        0.005002318775684634,
+        -0.5143858238250185],
+        dtype=np.float32
+    )
+
+    # --- Undistort the input pixel points ---
+    undistorted = cv2.undistortPoints(
+        contour_sorted.reshape(-1, 1, 2),
+        camera_matrix,
+        dist_coeffs,
+        P=camera_matrix  # Output in pixel coordinates
+    ).reshape(-1, 2)
+
+    if debug:
+        print(f"\n[Step 0] Undistorted pixel coordinates:\n{undistorted}")
 
     # --- Convert pixel coordinates to mm relative to the center of the sensor ---
     points_mm_centre = np.zeros((4, 2))
-    points_mm_centre[:, 0] = ((contour_sorted[:, 0] - 0.5 * sensor_width_px) *
+    points_mm_centre[:, 0] = ((undistorted[:, 0] - 0.5 * sensor_width_px) *
                               (sensor_width / sensor_width_px))  # X axis
-    points_mm_centre[:, 1] = ((sensor_height_px - contour_sorted[:, 1] - 0.5 * sensor_height_px) *
+    points_mm_centre[:, 1] = ((sensor_height_px - undistorted[:, 1] - 0.5 * sensor_height_px) *
                               (sensor_height / sensor_height_px))  # Y axis
 
     if debug:
@@ -98,9 +127,9 @@ def pixel_to_world_distances(contour_sorted, debug=False):
     points_camera[:, 0] = points_mm_centre[:, 0]  # X
     points_camera[:, 1] = points_mm_centre[:, 1]  # Y
     points_camera[:, 2] = focal_length            # Z (depth from lens center)
+
     if debug:
-        print(f"\n[Step 2] Vector from focal point to projected sensor (mm)"
-              f"\n(left-right, sensor-up sensor-down, normal to sensor) :\n{points_camera}")
+        print(f"\n[Step 2] Rays in camera coordinates (mm):\n{points_camera}")
 
     # --- Rotate rays to world coordinates (camera tilt) ---
     rotation_matrix = np.array([
@@ -109,22 +138,96 @@ def pixel_to_world_distances(contour_sorted, debug=False):
         [0, np.sin(camera_angle_rad),  np.cos(camera_angle_rad)]
     ])
     points_global = (rotation_matrix @ points_camera.T).T  # shape (4, 3)
+
     if debug:
-        print(f"\n[Step 3] Vector from focal point to projected sensor in global coordinates (mm)"
-              f"\n(left-right, global-height, paper-depth):\n{points_global}")
+        print(f"\n[Step 3] Rays in global coordinates (mm):\n{points_global}")
 
     # --- Project onto ground plane (scale vectors so Z=0) ---
-    k_values = - camera_height / points_global[:, 1]  # Scaling factors to flatten to ground
+    k_values = -camera_height / points_global[:, 1]  # Scaling factors to flatten to ground
+
     if debug:
-        print(f"\n[Step 4] Scaling factor to project sensor to ground:\n{k_values}")
+        print(f"\n[Step 4] Scaling factors to project rays to ground plane:\n{k_values}")
 
     ground_coords = np.zeros((4, 2))
     ground_coords[:, 0] = k_values * points_global[:, 0]  # X (left-right)
     ground_coords[:, 1] = k_values * points_global[:, 2] + stamper_setback  # Y (depth)
+
     if debug:
-        print(f"\n[Step 5] Vector from point :\n{ground_coords}")
+        print(f"\n[Step 5] Real-world coordinates of square corners (mm):\n{ground_coords}")
 
     return ground_coords
+
+def fit_rectangle_least_squares(points):
+    """
+    Fit a rectangle to 4 points by minimizing the squared distance
+    to the rectangle corners, enforcing right angles.
+
+    Args:
+        points (np.ndarray): shape (4,2) input points.
+
+    Returns:
+        np.ndarray: shape (4,2) fitted rectangle corners.
+    """
+    points = np.asarray(points)
+
+    # Initial guess:
+    # Use first point as P0
+    P0 = points[0]
+    # v: vector from P0 to P1
+    v = points[1] - P0
+    # w: vector from P0 to P3
+    w = points[3] - P0
+
+    # Parameter vector: [P0_x, P0_y, v_x, v_y, w_x, w_y]
+    x0 = np.hstack((P0, v, w))
+
+    def residuals(params):
+        P0 = params[0:2]
+        v = params[2:4]
+        w = params[4:6]
+
+        # Enforce orthogonality by penalizing dot product
+        orth_penalty = np.dot(v, w)
+
+        # Construct rectangle corners
+        P = np.array([
+            P0,
+            P0 + v,
+            P0 + v + w,
+            P0 + w
+        ])
+
+        # Compute distances from input points to these corners
+        dists = P - points
+        res = dists.flatten()
+
+        # Add orthogonality penalty weighted (e.g., times 100)
+        res = np.hstack((res, orth_penalty * 100))
+
+        return res
+
+    result = least_squares(residuals, x0)
+
+    P0 = result.x[0:2]
+    v = result.x[2:4]
+    w = result.x[4:6]
+
+    fitted_corners = np.array([
+        P0,
+        P0 + v,
+        P0 + v + w,
+        P0 + w
+    ])
+
+    # 👇 Compute final error explicitly here
+    orth_penalty = np.dot(v, w)
+    residual_vec = (fitted_corners - points).flatten()
+    final_error = np.sum(residual_vec**2) + (orth_penalty * 100)**2
+
+    return fitted_corners, final_error
+
+
+
 
 def generate_real_world_coordinates(world_distances):
 
@@ -140,12 +243,12 @@ def generate_real_world_coordinates(world_distances):
     average_grid_height = (left_height + right_height) / 2
 
     # Step 2: Assume square grid based on average size
-    average_grid_size = (average_grid_width + average_grid_height) / 2
+    # average_grid_size = (average_grid_width + average_grid_height) / 2
 
     destination_points = np.array([
-        [0, average_grid_size],  # Top-left
-        [average_grid_size, average_grid_size],  # Top-right
-        [average_grid_size, 0],  # Bottom-right
+        [0, average_grid_height],  # Top-left
+        [average_grid_width, average_grid_height],  # Top-right
+        [average_grid_width, 0],  # Bottom-right
         [0, 0]  # Bottom-left
     ])
 
@@ -181,10 +284,12 @@ def generate_real_world_coordinates(world_distances):
     robot_heading_deg = np.degrees(heading_radians)
 
     # Step 6: Calculate cell size
-    cell_size = average_grid_size / 9
+    horizontal_cell_size = average_grid_width / 9
+    vertical_cell_size = average_grid_height / 9
 
 
-    return robot_heading_deg, robot_position_new, cell_size
+
+    return robot_heading_deg, robot_position_new, horizontal_cell_size, vertical_cell_size
 
 def warp_image(image, contour_sorted, target_size):
 
@@ -656,7 +761,7 @@ def solve_sudoku(grid):
         return None
 
 
-def generate_writing_instructions(unsolved_board, solved_board, cell_size_mm):
+def generate_writing_instructions(unsolved_board, solved_board, horizontal_cell_size, vertical_cell_size):
     instructions = []
 
     blank_cells = []
@@ -676,8 +781,8 @@ def generate_writing_instructions(unsolved_board, solved_board, cell_size_mm):
         sorted_cells.extend(row_cells)
 
     for (row, col) in sorted_cells:
-        x_mm = float((col + 0.5) * cell_size_mm)
-        y_mm = float(((8-row) + 0.5) * cell_size_mm)
+        x_mm = float((col + 0.5) * horizontal_cell_size)
+        y_mm = float(((8-row) + 0.5) * vertical_cell_size)
         digit = int(solved_board[row, col])
         instructions.append((round(x_mm, 2), round(y_mm, 2), digit))
 
@@ -688,7 +793,8 @@ def generate_writing_instructions(unsolved_board, solved_board, cell_size_mm):
 def plan_robot_move(
     x1, y1, heading_deg,  # initial center position
     x4, y4,               # desired center target (where stamp lands)
-    cell_size,
+    horizontal_cell_size,
+    vertical_cell_size,
     wheel_diameter=37,    # mm
     wheel_base=67.5,        # mm (distance between wheels)
     stamp_forward_offset=64,    # mm (center to stamp)
@@ -698,7 +804,7 @@ def plan_robot_move(
     dx = x4 - x1
     dy = y4 - y1
 
-    if dy == 0 or math.isclose(dy, cell_size, abs_tol=0.1):  # if we are performing a "normal" move. I.e., moving only across or up
+    if dy == 0 or math.isclose(dy, vertical_cell_size, abs_tol=0.1):  # if we are performing a "normal" move. I.e., moving only across or up
 
         if dy == 0:  # if we are just moving left-right
             # Translation
@@ -715,7 +821,7 @@ def plan_robot_move(
             final_rotation = (0, "NA", "NA", 0)
             translation = (translation_distance, "both", translation_direction, translation_rotations)
 
-        elif math.isclose(dy, cell_size, abs_tol=0.1):  # If we are just moving up (will  not work if a whole row is already populated)
+        elif math.isclose(dy, vertical_cell_size, abs_tol=0.1):  # If we are just moving up (will  not work if a whole row is already populated)
             # rotation right wheel to get the right wheel up to the final height
             initial_rotation_angle = - math.acos((wheel_base - cell_size)/wheel_base)  # radians
             initial_rotation_wheel = "right"
@@ -869,15 +975,20 @@ def control_steppers(move_sequence):
         elif motor == "both":
             move_both_steppers(revolutions, revolutions, direction, direction)
 
-image_path = 'sudoku.png'
+image_path = 'sudoku-v2.jpg'
 eroded, original, gray = preprocess_image(image_path)
 contour = find_sudoku_contour(eroded, original)
 contour_sorted = sort_corners(contour)
-world_distances = pixel_to_world_distances(contour_sorted)
-robot_heading_deg, robot_position_new, cell_size = generate_real_world_coordinates(world_distances)
+print(f"Contours sorted: {contour_sorted}")
+print(type(contour_sorted))
+world_distances_unfitted = pixel_to_world_distances(contour_sorted)
+world_distances_fitted, _ = fit_rectangle_least_squares(world_distances_unfitted)
+print(f"World distances: \n{world_distances_fitted}")
+
+robot_heading_deg, robot_position_new, horizontal_cell_size, vertical_cell_size = generate_real_world_coordinates(world_distances_fitted)
 print(f"\nRobot Heading: {robot_heading_deg:.4f} degrees")
 print(f"Robot Position: ({robot_position_new[0]:.2f}, {robot_position_new[1]:.2f}) mm")
-print(f"Estimated Cell Size: {cell_size:.0f} mm")
+print(f"Horizontal Cell Size: {horizontal_cell_size:.1f} mm\nVertical Cell Size: {vertical_cell_size:.1f} mm")
 warped_image = warp_image(gray, contour_sorted, target_size=900)
 # model = load_model("digit_cnn.keras")
 interpreter = Interpreter(model_path="digit_cnn.tflite")
@@ -886,70 +997,13 @@ virtual_board, instructions = build_virtual_sudoku(warped_image)
 print_virtual_board(virtual_board)
 solved_board = solve_sudoku(virtual_board)
 print_virtual_board(solved_board)
-writing_instructions = generate_writing_instructions(virtual_board, solved_board, cell_size)
+writing_instructions = generate_writing_instructions(virtual_board, solved_board, horizontal_cell_size, vertical_cell_size)
 
 
 # Initial position
 x_current = robot_position_new[0]
 y_current = robot_position_new[1]
 heading_deg = robot_heading_deg
-
-# writing_instructions = [
-#     [371.11, 21.83, 8],
-#     [327.45, 21.83, 7],
-#     [283.79, 21.83, 4],
-#     [240.13, 21.83, 1],
-#     [196.47, 21.83, 3],
-#     [109.15, 21.83, 9],
-#     [65.49, 21.83, 5],
-#     [21.83, 65.49, 1],
-#     [152.81, 65.49, 8],
-#     [196.47, 65.49, 9],
-#     [327.45, 65.49, 6],
-#     [371.11, 65.49, 2],
-#     [371.11, 109.15, 5],
-#     [283.79, 109.15, 1],
-#     [240.13, 109.15, 2],
-#     [196.47, 109.15, 4],
-#     [152.81, 109.15, 7],
-#     [21.83, 109.15, 6],
-#     [65.49, 152.81, 7],
-#     [109.15, 152.81, 1],
-#     [152.81, 152.81, 4],
-#     [240.13, 152.81, 6],
-#     [283.79, 152.81, 2],
-#     [371.11, 152.81, 3],
-#     [371.11, 196.47, 4],
-#     [327.45, 196.47, 1],
-#     [283.79, 196.47, 9],
-#     [109.15, 196.47, 6],
-#     [65.49, 196.47, 3],
-#     [21.83, 196.47, 5],
-#     [21.83, 240.13, 8],
-#     [109.15, 240.13, 4],
-#     [152.81, 240.13, 9],
-#     [240.13, 240.13, 3],
-#     [283.79, 240.13, 6],
-#     [327.45, 240.13, 5],
-#     [371.11, 283.79, 9],
-#     [240.13, 283.79, 7],
-#     [196.47, 283.79, 6],
-#     [152.81, 283.79, 3],
-#     [109.15, 283.79, 5],
-#     [21.83, 283.79, 4],
-#     [21.83, 327.45, 3],
-#     [65.49, 327.45, 6],
-#     [196.47, 327.45, 8],
-#     [240.13, 327.45, 9],
-#     [371.11, 327.45, 1],
-#     [327.45, 371.11, 3],
-#     [283.79, 371.11, 5],
-#     [196.47, 371.11, 2],
-#     [152.81, 371.11, 1],
-#     [109.15, 371.11, 8],
-#     [65.49, 371.11, 9],
-#     [21.83, 371.11, 7]
-# ]
 
 LEFT_STEPPER_PINS, RIGHT_STEPPER_PINS, STEP_SEQUENCE, INCREMENTS_PER_REVOLUTION = initialise_steppers()
 
@@ -958,7 +1012,7 @@ for i, instruction in enumerate(writing_instructions):
     x_target, y_target, digit = instruction
 
     # Call the plan_robot_move function to calculate the movement to the next target
-    robot_path = plan_robot_move(x_current, y_current, heading_deg, x_target, y_target, cell_size)
+    robot_path = plan_robot_move(x_current, y_current, heading_deg, x_target, y_target, vertical_cell_size)
     print_moves(robot_path, i)
 
     # CALL FUNCTION TO RUN STEPPER MOTORS
