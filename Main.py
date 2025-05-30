@@ -6,15 +6,35 @@ from scipy.optimize import least_squares
 from gpiozero import OutputDevice
 from skimage.segmentation import clear_border
 import threading  # Allows motors to run simultaneously
-try:
-    # Try for pi
-    from ai_edge_litert.interpreter import Interpreter
-except ModuleNotFoundError:
-    # Fallback to full TensorFlow (for Mac / PC)
-    from tensorflow.lite.python.interpreter import Interpreter
+from ai_edge_litert.interpreter import Interpreter
+import subprocess
 
-def preprocess_image(image_path, debug=False):
-    image = cv2.imread(image_path)
+def capture_image():
+    """
+    Captures a photo from the Raspberry Pi camera using libcamera-jpeg
+    and returns it as a NumPy array (OpenCV image).
+    """
+    # Run libcamera-jpeg and capture JPEG data from stdout
+    result = subprocess.run(
+        ['libcamera-jpeg', '-o', '-', '--width', '2592', '--height', '1944', '--nopreview'],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL  # You can change to subprocess.PIPE if you want logs
+    )
+
+    # Convert binary output to NumPy array
+    image_bytes = np.frombuffer(result.stdout, dtype=np.uint8)
+
+    # Decode JPEG image to OpenCV format
+    image = cv2.imdecode(image_bytes, cv2.IMREAD_COLOR)
+
+    if image is None:
+        raise RuntimeError("Failed to capture or decode image from camera")
+
+    return image
+
+def preprocess_image(image, debug=False):
+    image = cv2.imread(image)
+    # image = cv2.rotate(image, cv2.ROTATE_180)
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     original = image.copy()
     gray=gray.copy()
@@ -74,14 +94,81 @@ def sort_corners(contour):
 
 def pixel_to_world_distances(contour_sorted, debug=False):
     # --- Camera and image parameters ---
+    stamper_setback = 16  # mm (offset in robot's forward direction)
+    camera_height = 85    # mm (height from lens center to ground)
+    camera_angle = 26.35  # degrees (tilt down from horizontal)
+    camera_angle_rad = -np.radians(camera_angle)
+
+    # --- Intrinsic camera matrix and distortion coefficients ---
+    camera_matrix = np.array([
+        [2650.9964176101485, 0.0, 1638.4541745042789],
+        [0.0, 2644.434621507731, 1106.6683119862594],
+        [0.0, 0.0, 1.0]],
+        dtype=np.float32
+    )
+
+    dist_coeffs = np.array([
+        0.19930490026457645,
+        -0.2903695599399088,
+        -0.007406225233953261,
+        0.005002318775684634,
+        -0.5143858238250185],
+        dtype=np.float32
+    )
+
+    N = len(contour_sorted)
+
+    # --- Undistort and reproject to pixel coordinates ---
+    undistorted = cv2.undistortPoints(
+        contour_sorted.reshape(-1, 1, 2),
+        camera_matrix,
+        dist_coeffs,
+        P=camera_matrix  # Reproject to pixel space
+    ).reshape(-1, 2)
+
+    if debug:
+        print(f"\n[Step 0] Undistorted pixel coordinates:\n{undistorted}")
+
+    # --- Convert pixel coordinates to normalized camera coordinates ---
+    homog_points = cv2.convertPointsToHomogeneous(undistorted).reshape(-1, 3)  # (x, y, 1)
+    points_camera = (np.linalg.inv(camera_matrix) @ homog_points.T).T  # shape (N, 3)
+
+    if debug:
+        print(f"\n[Step 1] Rays in camera coordinates:\n{points_camera}")
+
+    # --- Rotate camera rays to world frame (accounting for tilt down) ---
+    rotation_matrix = np.array([
+        [1, 0, 0],
+        [0, np.cos(camera_angle_rad), -np.sin(camera_angle_rad)],
+        [0, np.sin(camera_angle_rad),  np.cos(camera_angle_rad)]
+    ])
+    points_global = (rotation_matrix @ points_camera.T).T
+
+    if debug:
+        print(f"\n[Step 2] Rays in global coordinates (tilted down):\n{points_global}")
+
+    # --- Project rays onto ground plane (Y = -camera_height) ---
+    k_values = -camera_height / points_global[:, 1]  # scale factors
+
+    ground_coords = np.zeros((N, 2))
+    ground_coords[:, 0] = - k_values * points_global[:, 0]                # X axis (left-right)
+    ground_coords[:, 1] = - k_values * points_global[:, 2] + stamper_setback  # Y axis (forward-back)
+
+    if debug:
+        print(f"\n[Step 3] Real-world coordinates of points on ground (mm):\n{ground_coords}")
+
+    return ground_coords
+
+def pixel_to_world_distances2(contour_sorted, debug=False):
+    # --- Camera and image parameters ---
     stamper_setback = 16  # mm
     focal_length = 3.04  # mm
     sensor_width = 3.68    # mm
     sensor_height = 2.76   # mm
     sensor_width_px = 3280
     sensor_height_px = 2464
-    camera_height = 87.5  # mm
-    camera_angle = 43.73  # degrees
+    camera_height = 85  # mm
+    camera_angle = 26.51  # degrees (from vertical?)
     camera_angle_rad = np.radians(camera_angle)
 
     # --- Intrinsic camera matrix and distortion coefficients ---
@@ -109,6 +196,7 @@ def pixel_to_world_distances(contour_sorted, debug=False):
         P=camera_matrix  # Output in pixel coordinates
     ).reshape(-1, 2)
 
+    # undistorted = contour_sorted
     if debug:
         print(f"\n[Step 0] Undistorted pixel coordinates:\n{undistorted}")
 
@@ -117,7 +205,7 @@ def pixel_to_world_distances(contour_sorted, debug=False):
     points_mm_centre[:, 0] = ((undistorted[:, 0] - 0.5 * sensor_width_px) *
                               (sensor_width / sensor_width_px))  # X axis
     points_mm_centre[:, 1] = ((sensor_height_px - undistorted[:, 1] - 0.5 * sensor_height_px) *
-                              (sensor_height / sensor_height_px))  # Y axis
+                              (sensor_height / sensor_height_px))  # Y axis, accounting for fact that y pixels are measured from the top of the image
 
     if debug:
         print(f"\n[Step 1] Pixel coordinates relative to sensor centre (mm):\n{points_mm_centre}")
@@ -226,9 +314,6 @@ def fit_rectangle_least_squares(points):
 
     return fitted_corners, final_error
 
-
-
-
 def generate_real_world_coordinates(world_distances):
 
     # Step 1: Calculate average grid width and height
@@ -239,7 +324,9 @@ def generate_real_world_coordinates(world_distances):
     average_grid_width = (top_width + bottom_width) / 2
 
     left_height = np.linalg.norm(top_left - bottom_left)
+    print(f"left_height: {left_height}")
     right_height = np.linalg.norm(top_right - bottom_right)
+    print(f"right_height: {right_height}")
     average_grid_height = (left_height + right_height) / 2
 
     # Step 2: Assume square grid based on average size
@@ -275,12 +362,14 @@ def generate_real_world_coordinates(world_distances):
     translation_vector = destination_centroid - rotation_matrix @ source_centroid
 
     # Step 4: Calculate robot's new position
-    robot_original_position = np.array([0, 0])  # In robot's own frame
-    robot_position_new = rotation_matrix @ robot_original_position + translation_vector
+    robot_camera_original_position = np.array([0, 0])  # In robot's own frame
+    robot_camera_position_new = rotation_matrix @ robot_camera_original_position + translation_vector
+    robot_stamp_position_new = robot_camera_position_new.copy()
+    robot_stamp_position_new[1] -= 9  # Subtract 9mm from y (forward/backward) only
 
     # Step 5: Calculate robot heading
     # Extract rotation angle from rotation matrix
-    heading_radians = np.arctan2(rotation_matrix[1, 0], rotation_matrix[0, 0])
+    heading_radians = - (np.arctan2(rotation_matrix[1, 0], rotation_matrix[0, 0]))
     robot_heading_deg = np.degrees(heading_radians)
 
     # Step 6: Calculate cell size
@@ -289,7 +378,7 @@ def generate_real_world_coordinates(world_distances):
 
 
 
-    return robot_heading_deg, robot_position_new, horizontal_cell_size, vertical_cell_size
+    return robot_heading_deg, robot_stamp_position_new, horizontal_cell_size, vertical_cell_size
 
 def warp_image(image, contour_sorted, target_size):
 
@@ -308,7 +397,7 @@ def warp_image(image, contour_sorted, target_size):
 
 def extract_digit(i, j, warped_image, target_size=900):
     cell_size_actual = target_size // 9
-    cell_size_buffered = target_size // 6  # ~12.5% larger for buffer
+    cell_size_buffered = target_size // 8  # ~12.5% larger for buffer
 
     # Center of the cell
     center_x = j * cell_size_actual + cell_size_actual // 2
@@ -332,8 +421,8 @@ def extract_digit(i, j, warped_image, target_size=900):
     # cv2.destroyAllWindows()
 
     kernel = np.ones((2, 2), np.uint8)
-    eroded = cv2.erode(thresh_digit, kernel, iterations=2)
-    dilated = cv2.dilate(eroded, kernel, iterations=1)
+    eroded = cv2.erode(thresh_digit, kernel, iterations=0)
+    dilated = cv2.dilate(eroded, kernel, iterations=0)
     cleared = clear_border(dilated)
     # cv2.imshow('cleared', cleared)
     # cv2.waitKey(0)
@@ -363,11 +452,6 @@ def extract_digit(i, j, warped_image, target_size=900):
     if np.sum(resized > 30) < 20:
         return None
     return resized
-
-# def predict_digit_full_model(cell_img):
-#     cell_img = cell_img.reshape(1, 28, 28, 1).astype("float32") / 255.0
-#     pred = model.predict(cell_img, verbose=0)
-#     return np.argmax(pred) + 1  # add 1 since our labels were 1-9
 
 def predict_digit(cell_img, interpreter):
     # Preprocess input
@@ -760,7 +844,6 @@ def solve_sudoku(grid):
         # Search failed, no solution found
         return None
 
-
 def generate_writing_instructions(unsolved_board, solved_board, horizontal_cell_size, vertical_cell_size):
     instructions = []
 
@@ -791,9 +874,8 @@ def generate_writing_instructions(unsolved_board, solved_board, horizontal_cell_
     return instructions
 
 def plan_robot_move(
-    x1, y1, heading_deg,  # initial center position
+    x1, y1, heading_deg,  # initial center position (where stamp is)
     x4, y4,               # desired center target (where stamp lands)
-    horizontal_cell_size,
     vertical_cell_size,
     wheel_diameter=37,    # mm
     wheel_base=67.5,        # mm (distance between wheels)
@@ -823,7 +905,7 @@ def plan_robot_move(
 
         elif math.isclose(dy, vertical_cell_size, abs_tol=0.1):  # If we are just moving up (will  not work if a whole row is already populated)
             # rotation right wheel to get the right wheel up to the final height
-            initial_rotation_angle = - math.acos((wheel_base - cell_size)/wheel_base)  # radians
+            initial_rotation_angle = - math.acos((wheel_base - vertical_cell_size)/wheel_base)  # radians (should confirm vertical cell size is correct argument here
             initial_rotation_wheel = "right"
             initial_rotation_direction = "forward"
             initial_rotation_rotations = abs(initial_rotation_angle * wheel_base) / wheel_circumference
@@ -869,6 +951,8 @@ def plan_robot_move(
         y3 = y4 - half_wheel_base
             # Vector from current to target right wheel position
         dx = x3 - x2
+        print(f"dx:{dx}")
+        print(f"dy:{dy}")
         dy = y3 - y2
         phi = math.atan2(dx, dy)  # Rotation from vertical to final
         initial_rotation_angle = phi - heading_rad  # Rotation from initial to final
@@ -885,10 +969,12 @@ def plan_robot_move(
 
         # 3. FINAL ROTATION
         final_rotation_angle = math.pi*0.5 - (initial_rotation_angle + heading_rad)
+        print(f"initial rotation angle:{180/np.pi * initial_rotation_angle}")
+        print(f"final rotation angle:{180/np.pi * final_rotation_angle}")
         final_rotation_rotations = (wheel_base * final_rotation_angle) / wheel_circumference
 
         # 4. MOVE SEQUENCE
-        move_sequence = [(initial_rotation_angle, "left", "forward", initial_rotation_rotations),
+        move_sequence = [(initial_rotation_angle, "left", "backward", -initial_rotation_rotations),
                          (translation_distance, "both", "forward", translation_rotations),
                          (final_rotation_angle, "left", "forward", final_rotation_rotations)
         ]
@@ -975,13 +1061,14 @@ def control_steppers(move_sequence):
         elif motor == "both":
             move_both_steppers(revolutions, revolutions, direction, direction)
 
-image_path = 'sudoku-v2.jpg'
-eroded, original, gray = preprocess_image(image_path)
+image = 'sudoku-v8.jpg'
+# image = capture_image()
+eroded, original, gray = preprocess_image(image)
 contour = find_sudoku_contour(eroded, original)
 contour_sorted = sort_corners(contour)
 print(f"Contours sorted: {contour_sorted}")
 print(type(contour_sorted))
-world_distances_unfitted = pixel_to_world_distances(contour_sorted)
+world_distances_unfitted = pixel_to_world_distances(contour_sorted, debug=True)
 world_distances_fitted, _ = fit_rectangle_least_squares(world_distances_unfitted)
 print(f"World distances: \n{world_distances_fitted}")
 
@@ -1005,7 +1092,7 @@ x_current = robot_position_new[0]
 y_current = robot_position_new[1]
 heading_deg = robot_heading_deg
 
-LEFT_STEPPER_PINS, RIGHT_STEPPER_PINS, STEP_SEQUENCE, INCREMENTS_PER_REVOLUTION = initialise_steppers()
+# LEFT_STEPPER_PINS, RIGHT_STEPPER_PINS, STEP_SEQUENCE, INCREMENTS_PER_REVOLUTION = initialise_steppers()
 
 # Loop through instructions
 for i, instruction in enumerate(writing_instructions):
@@ -1016,7 +1103,7 @@ for i, instruction in enumerate(writing_instructions):
     print_moves(robot_path, i)
 
     # CALL FUNCTION TO RUN STEPPER MOTORS
-    control_steppers(robot_path)
+    #control_steppers(robot_path)
     sleep(0.1)
     # CALL FUNCTION TO SELECT DIGIT
     # CALL FUNCTION TO STAMP DIGIT
